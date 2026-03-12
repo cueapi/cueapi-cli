@@ -3,7 +3,7 @@ name = "cueapi"
 version = "0.1.0"
 description = "CLI for CueAPI — Your Agents' Cue to Act. The scheduling API for AI agents."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 authors = [
     {name = "Vector Apps Inc.", email = "hello@cueapi.ai"}
@@ -12,10 +12,10 @@ keywords = ["cueapi", "ai-agents", "scheduling", "webhook", "cron", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries",
-    "Topic :: System :: Scheduling",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "click>=8.0",
