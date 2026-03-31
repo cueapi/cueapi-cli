@@ -134,8 +134,7 @@ def create(
                 click.echo()
             elif resp.status_code == 403:
                 error = resp.json().get("detail", {}).get("error", {})
-                echo_error(error.get("message", "Cue limit exceeded"))
-                click.echo("\nRun `cueapi upgrade` to increase your limit.")
+                echo_error(error.get("message", "Cue limit exceeded") + "\nRun `cueapi upgrade` to increase your limit.")
             else:
                 error = resp.json().get("detail", {}).get("error", {})
                 echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
@@ -355,7 +354,8 @@ def upgrade(ctx: click.Context) -> None:
             if resp.status_code == 200:
                 data = resp.json()
                 plan = data.get("plan", {})
-                click.echo(f"\nCurrent plan: {plan.get('name', 'Free').capitalize()}\n")
+                plan_name = plan if isinstance(plan, str) else plan.get("name", "free")
+                click.echo(f"\nCurrent plan: {plan_name.capitalize()}\n")
 
             click.echo("Available plans:")
             click.echo("  Pro    $9.99/mo   100 cues, 5,000 executions/mo")
@@ -422,7 +422,8 @@ def usage(ctx: click.Context) -> None:
             rate = data.get("rate_limit", {})
 
             click.echo()
-            echo_info("Plan:", plan.get("name", "free").capitalize())
+            plan_name = plan if isinstance(plan, str) else plan.get("name", "free")
+            echo_info("Plan:", plan_name.capitalize())
 
             active = cues.get("active", 0)
             cue_limit = cues.get("limit", 10)
