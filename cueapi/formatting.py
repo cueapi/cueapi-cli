@@ -5,10 +5,12 @@ import json
 from typing import Any, Dict, List, Optional
 
 
-def echo_error(message: str) -> None:
-    """Print an error message."""
+def echo_error(message: str, exit_code: int = 1) -> None:
+    """Print an error message and exit with non-zero code."""
     import click
     click.echo(click.style(f"Error: {message}", fg="red"), err=True)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 def echo_success(message: str) -> None:
