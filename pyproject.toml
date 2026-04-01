@@ -1,18 +1,17 @@
 [project]
 name = "cueapi"
-version = "0.1.0"
-description = "CLI for CueAPI — Your Agents' Cue to Act. The scheduling API for AI agents."
+version = "0.1.2"
+description = "CLI for CueAPI - the scheduling API for AI agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
-    {name = "Vector Apps Inc.", email = "hello@cueapi.ai"}
+    {name = "Vector Apps Inc.", email = "support@vector.build"}
 ]
 keywords = ["cueapi", "ai-agents", "scheduling", "webhook", "cron", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",
@@ -24,7 +23,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://cueapi.ai"
-Repository = "https://github.com/govindkavaturi-art/cueapi-cli"
+Documentation = "https://docs.cueapi.ai"
+Repository = "https://github.com/cueapi/cueapi-cli"
+"Bug Tracker" = "https://github.com/cueapi/cueapi-cli/issues"
 
 [project.scripts]
 cueapi = "cueapi.cli:main"
