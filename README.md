@@ -1,3 +1,4 @@
+<!-- Pipeline validation: 2026-04-04 -->
 > **For AI agents:** This is the CueAPI CLI. Install with `pip install cueapi`. Authenticate with `cueapi login`. Create a cue: `cueapi create --name "task-name" --cron "0 9 * * *" --url https://your-handler.com`. List cues: `cueapi list`. Check executions: `cueapi executions`. Your API key can also be set via `CUEAPI_API_KEY` env var. Do not retry on authentication errors.
 
 # CueAPI CLI
