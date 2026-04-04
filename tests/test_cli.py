@@ -40,6 +40,33 @@ def test_create_help():
     assert result.exit_code == 0
     assert "--name" in result.output
     assert "--url" in result.output
+    assert "--worker" in result.output
+    assert "--payload" in result.output
+    assert "--on-failure" in result.output
+
+
+def test_create_worker_flag_in_help():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    assert "worker transport" in result.output.lower() or "--worker" in result.output
+
+
+def test_create_requires_url_or_worker():
+    result = runner.invoke(main, ["create", "--name", "test", "--cron", "0 9 * * *"])
+    assert result.exit_code != 0
+    assert "url" in result.output.lower() or "worker" in result.output.lower()
+
+
+def test_create_on_failure_in_help():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    assert "--on-failure" in result.output
+
+
+def test_key_regenerate_help():
+    result = runner.invoke(main, ["key", "regenerate", "--help"])
+    assert result.exit_code == 0
+    assert "--yes" in result.output or "-y" in result.output
 
 
 def test_list_help():

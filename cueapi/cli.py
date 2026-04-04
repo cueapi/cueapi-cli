@@ -75,11 +75,13 @@ def quickstart(ctx: click.Context) -> None:
 @click.option("--name", required=True, help="Cue name")
 @click.option("--cron", default=None, help="Cron expression for recurring cue")
 @click.option("--at", "at_time", default=None, help="ISO timestamp for one-time cue")
-@click.option("--url", required=True, help="Callback URL")
+@click.option("--url", default=None, help="Callback URL (not required with --worker)")
 @click.option("--method", default="POST", help="HTTP method (default: POST)")
 @click.option("--timezone", "tz", default="UTC", help="Timezone (default: UTC)")
 @click.option("--payload", default=None, help="JSON payload string")
 @click.option("--description", default=None, help="Cue description")
+@click.option("--worker", is_flag=True, default=False, help="Use worker transport (no public URL needed)")
+@click.option("--on-failure", "on_failure", default=None, help="JSON on_failure config, e.g. '{\"email\": false, \"pause\": true}'")
 @click.pass_context
 def create(
     ctx: click.Context,
@@ -91,12 +93,16 @@ def create(
     tz: str,
     payload: Optional[str],
     description: Optional[str],
+    worker: bool,
+    on_failure: Optional[str],
 ) -> None:
     """Create a new cue."""
     if cron and at_time:
         raise click.UsageError("Cannot use both --cron and --at. Choose one.")
     if not cron and not at_time:
         raise click.UsageError("Must specify either --cron or --at.")
+    if not worker and not url:
+        raise click.UsageError("--url is required unless --worker is set.")
 
     schedule = {"timezone": tz}
     if cron:
@@ -106,11 +112,15 @@ def create(
         schedule["type"] = "once"
         schedule["at"] = at_time
 
-    body = {
+    body: dict = {
         "name": name,
         "schedule": schedule,
-        "callback": {"url": url, "method": method},
     }
+
+    if worker:
+        body["transport"] = "worker"
+    else:
+        body["callback"] = {"url": url, "method": method}
 
     if payload:
         try:
@@ -120,6 +130,12 @@ def create(
 
     if description:
         body["description"] = description
+
+    if on_failure:
+        try:
+            body["on_failure"] = json.loads(on_failure)
+        except json.JSONDecodeError:
+            raise click.UsageError("--on-failure must be valid JSON")
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
