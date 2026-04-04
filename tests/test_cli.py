@@ -63,6 +63,28 @@ def test_create_on_failure_in_help():
     assert "--on-failure" in result.output
 
 
+def test_create_callback_alias():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    assert "--callback" in result.output
+
+
+def test_update_help():
+    result = runner.invoke(main, ["update", "--help"])
+    assert result.exit_code == 0
+    assert "--name" in result.output
+    assert "--cron" in result.output
+    assert "--callback" in result.output
+    assert "--payload" in result.output
+    assert "--on-failure" in result.output
+
+
+def test_update_requires_field():
+    result = runner.invoke(main, ["update", "cue_test123"])
+    assert result.exit_code != 0
+    assert "must specify" in result.output.lower() or "at least one" in result.output.lower()
+
+
 def test_key_regenerate_help():
     result = runner.invoke(main, ["key", "regenerate", "--help"])
     assert result.exit_code == 0
