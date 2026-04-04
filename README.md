@@ -4,7 +4,7 @@
 
 Your agents are failing silently. CueAPI tells you when and why.
 
-**Cron has no concept of success. Cue does.**
+*Cron has no concept of success. Cue does.*
 
 [![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://pypi.org/project/cueapi/)
@@ -12,6 +12,8 @@ Your agents are failing silently. CueAPI tells you when and why.
 [![Docs](https://img.shields.io/badge/docs-docs.cueapi.ai-black)](https://docs.cueapi.ai)
 
 The official CLI for [CueAPI](https://cueapi.ai). Manage your cues, check executions, and verify outcomes from the terminal.
+
+Built for AI builders running agents in production. Schedule your agent tasks, confirm delivery, and verify outcomes without leaving the terminal.
 
 ---
 
@@ -41,9 +43,16 @@ cueapi list
 
 ## Why CueAPI over cron?
 
-Your agent ran at 3am. Did it succeed? Cron does not know.
+Cron fires a job. That is it. No retries. No delivery confirmation. No outcome tracking. No visibility.
 
-CueAPI tracks every execution with proof of outcome. Every job becomes something you can verify.
+| Feature | Cron | CueAPI |
+|---------|------|--------|
+| Fires on schedule | Yes | Yes |
+| Confirms delivery | No | Yes |
+| Tracks outcomes | No | Yes |
+| Retries on failure | No | Yes (1, 5, 15 min) |
+| Alerts on failure | No | Yes |
+| Execution history | No | Yes |
 
 ---
 
