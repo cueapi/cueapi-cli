@@ -17,11 +17,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install CLI
-        run: pip install -e .
+      - name: Install CLI and test deps
+        run: |
+          pip install -e .
+          pip install pytest
 
-      - name: Verify CLI entry point
-        run: cueapi --help
-
-      - name: Verify CLI version
-        run: cueapi --version
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
