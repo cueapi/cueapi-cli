@@ -75,7 +75,7 @@ def quickstart(ctx: click.Context) -> None:
 @click.option("--name", required=True, help="Cue name")
 @click.option("--cron", default=None, help="Cron expression for recurring cue")
 @click.option("--at", "at_time", default=None, help="ISO timestamp for one-time cue")
-@click.option("--url", default=None, help="Callback URL (not required with --worker)")
+@click.option("--url", "--callback", default=None, help="Callback URL (not required with --worker)")
 @click.option("--method", default="POST", help="HTTP method (default: POST)")
 @click.option("--timezone", "tz", default="UTC", help="Timezone (default: UTC)")
 @click.option("--payload", default=None, help="JSON payload string")
@@ -357,6 +357,57 @@ def delete(ctx: click.Context, cue_id: str, yes: bool) -> None:
 
 
 # --- Billing commands ---
+
+
+@main.command()
+@click.argument("cue_id")
+@click.option("--name", default=None, help="New cue name")
+@click.option("--cron", default=None, help="New cron expression")
+@click.option("--url", "--callback", "url", default=None, help="New callback URL")
+@click.option("--payload", default=None, help="New JSON payload")
+@click.option("--description", default=None, help="New description")
+@click.option("--on-failure", "on_failure", default=None, help="JSON on_failure config")
+@click.pass_context
+def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[str],
+           url: Optional[str], payload: Optional[str], description: Optional[str],
+           on_failure: Optional[str]) -> None:
+    """Update an existing cue."""
+    body: dict = {}
+    if name:
+        body["name"] = name
+    if cron:
+        body["schedule"] = {"type": "recurring", "cron": cron}
+    if url:
+        body["callback"] = {"url": url}
+    if description:
+        body["description"] = description
+    if payload:
+        try:
+            body["payload"] = json.loads(payload)
+        except json.JSONDecodeError:
+            raise click.UsageError("--payload must be valid JSON")
+    if on_failure:
+        try:
+            body["on_failure"] = json.loads(on_failure)
+        except json.JSONDecodeError:
+            raise click.UsageError("--on-failure must be valid JSON")
+
+    if not body:
+        raise click.UsageError("Must specify at least one field to update.")
+
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.patch(f"/cues/{cue_id}", json=body)
+            if resp.status_code == 200:
+                c = resp.json()
+                echo_success(f"Updated: {cue_id} ({c['name']})")
+            elif resp.status_code == 404:
+                echo_error(f"Cue not found: {cue_id}")
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
 
 
 @main.command()

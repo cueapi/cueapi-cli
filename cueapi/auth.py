@@ -162,7 +162,7 @@ def do_key_regenerate(
 
     try:
         with CueAPIClient(api_key=api_key, profile=profile) as client:
-            resp = client.post("/auth/key/regenerate")
+            resp = client.post("/auth/key/regenerate", headers={"X-Confirm-Destructive": "true"})
             if resp.status_code != 200:
                 echo_error(f"Failed to regenerate key (HTTP {resp.status_code})")
                 return
