@@ -109,6 +109,12 @@ See [cueapi-python](https://github.com/cueapi/cueapi-python) for the full SDK an
 
 ---
 
+## Releases
+
+Releases are published to PyPI with PEP 740 attestations via GitHub Actions Trusted Publishing.
+
+---
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
