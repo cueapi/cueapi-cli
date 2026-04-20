@@ -1,5 +1,5 @@
 <!-- Pipeline validation: 2026-04-04 -->
-> **For AI agents:** This is the CueAPI CLI. Install with `pip install cueapi`. Authenticate with `cueapi login`. Create a cue: `cueapi create --name "task-name" --cron "0 9 * * *" --url https://your-handler.com`. List cues: `cueapi list`. Check executions: `cueapi executions`. Your API key can also be set via `CUEAPI_API_KEY` env var. Do not retry on authentication errors.
+> **For AI agents:** This is the CueAPI CLI. Install with `pip install cueapi`. Authenticate with `cueapi login`. Create a cue: `cueapi create --name "task-name" --cron "0 9 * * *" --url https://your-handler.com`. List cues: `cueapi list`. View a cue and its recent executions: `cueapi get <cue-id>`. Your API key can also be set via `CUEAPI_API_KEY` env var. Do not retry on authentication errors.
 
 # CueAPI CLI
 
@@ -33,11 +33,11 @@ cueapi login
 # Create your first cue
 cueapi create --name "morning-agent-brief" --cron "0 9 * * *" --url https://your-agent.com/run
 
-# Check execution history
-cueapi executions
-
 # See what is scheduled
 cueapi list
+
+# Inspect a cue and its recent executions
+cueapi get <cue-id>
 ```
 
 ---
@@ -65,16 +65,17 @@ Cron fires a job. That is it. No retries. No delivery confirmation. No outcome t
 | `cueapi whoami` | Show current user and plan |
 | `cueapi logout` | Remove local credentials |
 | `cueapi quickstart` | Guided first-cue setup |
-| `cueapi create` | Create a new cue |
+| `cueapi create` | Create a new cue (supports `--worker`, `--payload`, `--on-failure`) |
 | `cueapi list` | List all cues |
-| `cueapi get <id>` | Get cue details |
+| `cueapi get <id>` | Get cue details and recent executions |
+| `cueapi update <id>` | Update an existing cue |
 | `cueapi pause <id>` | Pause a cue |
 | `cueapi resume <id>` | Resume a cue |
 | `cueapi delete <id>` | Delete a cue |
-| `cueapi executions` | View execution history |
 | `cueapi usage` | Show current usage and limits |
 | `cueapi key regenerate` | Regenerate API key |
 | `cueapi upgrade` | Open billing |
+| `cueapi manage` | Open Stripe billing portal |
 
 ---
 
