@@ -2,6 +2,22 @@
 
 All notable changes to cueapi-cli will be documented here.
 
+## [0.2.0] - 2026-05-01
+
+### Added
+- `cueapi fire <cue-id>` for ad-hoc one-shot triggers and for using cues as a messaging channel between agents. Optional `--payload-override` (JSON) and `--merge-strategy` (`merge` default, `replace` opt-in). Wraps `POST /v1/cues/{id}/fire`.
+- `cueapi executions` subgroup with seven subcommands closing the receive-claim-process-complete loop for worker-transport executions:
+  - `executions list` historical executions across all cues.
+  - `executions list-claimable [--task] [--agent]` unclaimed executions ready for processing, server-side filtered. Required for single-purpose workers; without a filter, sibling tasks ahead in the LIMIT 50 window starve your handler.
+  - `executions get <id>` fetch one execution by ID.
+  - `executions claim <id> --worker-id ID` atomically claim a specific execution.
+  - `executions claim-next --worker-id ID [--task]` claim the next available execution. With `--task`, the CLI internally fans out (filtered list, pick oldest, claim by ID) since the server's claim endpoint does not accept a task filter today.
+  - `executions heartbeat <id> --worker-id ID` extend the claim lease. Sends `worker_id` via the `X-Worker-Id` request header (the server's actual transport for that field).
+  - `executions report-outcome <id> --success/--failure [...]` report a write-once outcome with optional `--external-id`, `--result-url`, `--summary`.
+
+### Changed
+- `__version__` in `cueapi/__init__.py` had drifted to 0.1.3 while `pyproject.toml` was at 0.1.5. Both now aligned at 0.2.0.
+
 ## [0.1.0] - 2025-03-28
 
 ### Added

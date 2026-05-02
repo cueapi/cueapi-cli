@@ -72,6 +72,14 @@ Cron fires a job. That is it. No retries. No delivery confirmation. No outcome t
 | `cueapi pause <id>` | Pause a cue |
 | `cueapi resume <id>` | Resume a cue |
 | `cueapi delete <id>` | Delete a cue |
+| `cueapi fire <id>` | Fire an existing cue immediately, optional `--payload-override` |
+| `cueapi executions list` | List historical executions across all cues |
+| `cueapi executions list-claimable` | List unclaimed worker executions, filter by `--task` / `--agent` |
+| `cueapi executions get <id>` | Fetch one execution by ID |
+| `cueapi executions claim <id> --worker-id ID` | Atomically claim an execution |
+| `cueapi executions claim-next --worker-id ID [--task]` | Claim the next available execution |
+| `cueapi executions heartbeat <id> --worker-id ID` | Extend the claim lease |
+| `cueapi executions report-outcome <id> --success/--failure` | Report a write-once outcome |
 | `cueapi usage` | Show current usage and limits |
 | `cueapi key regenerate` | Regenerate API key |
 | `cueapi upgrade` | Open billing |

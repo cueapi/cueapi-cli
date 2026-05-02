@@ -1,6 +1,6 @@
 [project]
 name = "cueapi"
-version = "0.1.5"
+version = "0.2.0"
 description = "Official CLI for CueAPI — open-source execution accountability primitive for AI agents. Schedule agent work, require evidence-backed outcomes, and gate execution with write-once verification from your terminal."
 readme = "README.md"
 license = { text = "MIT" }
