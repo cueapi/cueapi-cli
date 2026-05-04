@@ -1788,5 +1788,264 @@ def workers_delete(ctx: click.Context, worker_id: str, yes: bool) -> None:
 main.add_command(workers)
 
 
+# --- Messaging primitive: messages command group ---
+#
+# Mirrors `app/routers/messages.py` in cueapi-hosted. v1 surface covers the
+# message lifecycle (send / get / read / ack). The agent CRUD + inbox lives
+# in the sibling `cueapi agents` command group (separate PR).
+
+
+@main.group()
+def messages() -> None:
+    """Send and manage messages (messaging primitive: per-message lifecycle)."""
+    pass
+
+
+@messages.command(name="send")
+@click.option(
+    "--from",
+    "from_agent",
+    required=True,
+    help=(
+        "Sender agent — opaque agent_id or slug-form (agent@user). Sent as "
+        "the X-Cueapi-From-Agent header. Must be owned by the calling key."
+    ),
+)
+@click.option(
+    "--to",
+    required=True,
+    help="Recipient — opaque agent_id or slug-form (agent@user).",
+)
+@click.option("--body", "body_text", required=True, help="Message body (1-32768 chars)")
+@click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
+@click.option(
+    "--reply-to",
+    "reply_to",
+    default=None,
+    help="Previous message ID this is replying to (msg_<12 alphanumeric>). thread_id inherits.",
+)
+@click.option(
+    "--priority",
+    default=None,
+    type=click.IntRange(1, 5),
+    help="Priority 1-5 (server default 3). Receiver-pair limits may downgrade priority>3 to 3.",
+)
+@click.option(
+    "--expects-reply",
+    "expects_reply",
+    is_flag=True,
+    default=False,
+    help="Mark this message as expecting a reply (boolean flag on send).",
+)
+@click.option(
+    "--reply-to-agent",
+    "reply_to_agent",
+    default=None,
+    help="Decoupled reply target (defaults to the sender). Use when reply should route to a different agent.",
+)
+@click.option("--metadata", default=None, help="JSON metadata blob")
+@click.option(
+    "--idempotency-key",
+    "idempotency_key",
+    default=None,
+    help=(
+        "Optional Idempotency-Key header (≤255 chars). Same key + same body within "
+        "24h returns the existing message with HTTP 200 instead of 201; same key + "
+        "different body returns HTTP 409 idempotency_key_conflict."
+    ),
+)
+@click.pass_context
+def messages_send(
+    ctx: click.Context,
+    from_agent: str,
+    to: str,
+    body_text: str,
+    subject: Optional[str],
+    reply_to: Optional[str],
+    priority: Optional[int],
+    expects_reply: bool,
+    reply_to_agent: Optional[str],
+    metadata: Optional[str],
+    idempotency_key: Optional[str],
+) -> None:
+    """Send a message."""
+    body: dict = {"to": to, "body": body_text}
+    if subject:
+        body["subject"] = subject
+    if reply_to:
+        body["reply_to"] = reply_to
+    if priority is not None:
+        body["priority"] = priority
+    # Boolean flag — only send when True. Server default is False; sending
+    # `false` is no-op + adds payload noise. Pinned in tests.
+    if expects_reply:
+        body["expects_reply"] = True
+    if reply_to_agent:
+        body["reply_to_agent"] = reply_to_agent
+    if metadata:
+        try:
+            body["metadata"] = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise click.UsageError("--metadata must be valid JSON")
+
+    headers: dict = {"X-Cueapi-From-Agent": from_agent}
+    if idempotency_key:
+        if len(idempotency_key) > 255:
+            raise click.UsageError("--idempotency-key must be ≤255 characters")
+        headers["Idempotency-Key"] = idempotency_key
+
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post("/messages", json=body, headers=headers)
+            if resp.status_code in (200, 201):
+                m = resp.json()
+                click.echo()
+                if resp.status_code == 200:
+                    # Dedup hit on Idempotency-Key — same key + same body returned
+                    # the existing message. Tell the user explicitly so they don't
+                    # think a fresh send happened.
+                    echo_info("Idempotency-Key dedup hit:", "existing message returned")
+                echo_success(f"{'Sent' if resp.status_code == 201 else 'Existing'}: {m.get('id', '?')}")
+                if m.get("thread_id"):
+                    echo_info("Thread:", m["thread_id"])
+                echo_info("Delivery state:", m.get("delivery_state", "?"))
+                # Surface server's priority-downgrade signal if present. The
+                # server sets X-CueAPI-Priority-Downgraded: true when a
+                # receiver-pair priority limit downgrades the message to 3.
+                # httpx exposes headers case-insensitive on response.headers.
+                downgraded_header = None
+                try:
+                    downgraded_header = resp.headers.get("X-CueAPI-Priority-Downgraded")
+                except Exception:
+                    # FakeResp in unit tests doesn't have headers; tolerate.
+                    pass
+                if downgraded_header == "true":
+                    echo_info(
+                        "Priority downgraded:",
+                        "true (receiver-pair limit applied; message delivered at priority 3)",
+                    )
+                click.echo()
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                code = error.get("code", "conflict")
+                if code == "idempotency_key_conflict":
+                    echo_error(
+                        "Idempotency-Key conflict — same key was already used with a different body. "
+                        "Either reuse the original body or change the key."
+                    )
+                else:
+                    echo_error(error.get("message", f"Conflict (HTTP 409, {code})"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@messages.command(name="get")
+@click.argument("msg_id")
+@click.pass_context
+def messages_get(ctx: click.Context, msg_id: str) -> None:
+    """Get a single message by ID."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.get(f"/messages/{msg_id}")
+            if resp.status_code == 404:
+                echo_error(f"Message not found: {msg_id}")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            m = resp.json()
+            click.echo()
+            echo_info("ID:", m.get("id", msg_id))
+            echo_info("Delivery state:", format_status(m.get("delivery_state", "?")))
+            from_ref = m.get("from") or {}
+            from_label = from_ref.get("slug") or from_ref.get("agent_id", "?")
+            echo_info("From:", from_label)
+            echo_info("To:", m.get("to", "?"))
+            if m.get("subject"):
+                echo_info("Subject:", m["subject"])
+            if m.get("thread_id"):
+                echo_info("Thread:", m["thread_id"])
+            if m.get("reply_to"):
+                echo_info("Reply to:", m["reply_to"])
+            if m.get("priority") is not None:
+                echo_info("Priority:", str(m["priority"]))
+            if m.get("expects_reply"):
+                echo_info("Expects reply:", "true")
+            if m.get("body"):
+                # Body is up to 32KB — render verbatim, callers can pipe / grep.
+                click.echo()
+                click.echo("Body:")
+                click.echo(m["body"])
+            click.echo()
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@messages.command(name="read")
+@click.argument("msg_id")
+@click.pass_context
+def messages_read(ctx: click.Context, msg_id: str) -> None:
+    """Mark a message as read.
+
+    Idempotent — calling on an already-read message returns 200 unchanged.
+    Returns 409 if the message is in a terminal state (acked, expired).
+    """
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/messages/{msg_id}/read", json={})
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success(f"Marked read: {msg_id}")
+                echo_info("Delivery state:", data.get("delivery_state", "?"))
+                if data.get("read_at"):
+                    echo_info("Read at:", data["read_at"])
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Message not found: {msg_id}")
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Cannot transition from current state (terminal: acked or expired)"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@messages.command(name="ack")
+@click.argument("msg_id")
+@click.pass_context
+def messages_ack(ctx: click.Context, msg_id: str) -> None:
+    """Acknowledge a message — terminal state, no further transitions."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/messages/{msg_id}/ack", json={})
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success(f"Acked: {msg_id}")
+                echo_info("Delivery state:", data.get("delivery_state", "?"))
+                if data.get("acked_at"):
+                    echo_info("Acked at:", data["acked_at"])
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Message not found: {msg_id}")
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Cannot transition from current state"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+main.add_command(messages)
+
+
 if __name__ == "__main__":
     main()

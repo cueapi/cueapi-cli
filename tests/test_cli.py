@@ -1751,3 +1751,412 @@ def test_executions_group_help_includes_new_subcommands():
     assert result.exit_code == 0
     for sub in ("replay", "verification-pending", "verify"):
         assert sub in result.output, f"executions subcommand {sub} missing"
+
+# --- messaging primitive: messages command group ---
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: Any, headers: Optional[dict] = None):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+class _MessagesClient:
+    """Captures POST/GET for messages tests, including headers (for X-Cueapi-From-Agent)."""
+
+    def __init__(self, responses: Optional[dict] = None):
+        self.calls: list = []
+        self._responses = responses or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def _resolve(self, method: str, path: str):
+        for (m, p), factory in sorted(self._responses.items(), key=lambda kv: -len(kv[0][1])):
+            if m == method and path.startswith(p):
+                return factory()
+        return _FakeResp(200, {})
+
+    def post(self, path, json=None, headers=None, **_):
+        self.calls.append(("POST", path, json, headers))
+        return self._resolve("POST", path)
+
+    def get(self, path, params=None, headers=None, **_):
+        self.calls.append(("GET", path, params, headers))
+        return self._resolve("GET", path)
+
+
+def _patch_messages_client(monkeypatch, holder, responses=None):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _MessagesClient(responses=responses)
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+# --- help-text shape ---
+
+
+def test_messages_group_help():
+    result = runner.invoke(main, ["messages", "--help"])
+    assert result.exit_code == 0
+    for sub in ("send", "get", "read", "ack"):
+        assert sub in result.output, f"messages subcommand {sub} missing from --help"
+
+
+def test_messages_send_help_lists_required_flags():
+    result = runner.invoke(main, ["messages", "send", "--help"])
+    assert result.exit_code == 0
+    assert "--from" in result.output
+    assert "--to" in result.output
+    assert "--body" in result.output
+    assert "--idempotency-key" in result.output
+
+
+def test_messages_send_requires_from_and_to_and_body():
+    # Missing --from
+    r1 = runner.invoke(main, ["messages", "send", "--to", "x", "--body", "hi"])
+    assert r1.exit_code != 0
+    # Missing --to
+    r2 = runner.invoke(main, ["messages", "send", "--from", "x", "--body", "hi"])
+    assert r2.exit_code != 0
+    # Missing --body
+    r3 = runner.invoke(main, ["messages", "send", "--from", "x", "--to", "y"])
+    assert r3.exit_code != 0
+
+
+# --- send body + headers ---
+
+
+def test_messages_send_minimal_body_and_from_header(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201,
+                {"id": "msg_x", "delivery_state": "queued", "thread_id": "thr_x"},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "sender@x", "--to", "recipient@y", "--body", "hello"],
+    )
+    assert result.exit_code == 0, result.output
+    method, path, body, headers = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/messages"
+    assert body == {"to": "recipient@y", "body": "hello"}
+    # Sender goes via header, NOT body. Pinned because the server reads it
+    # from X-Cueapi-From-Agent and a refactor putting `from` in the body
+    # would silently swallow the value (Pydantic extra=forbid would 400 it
+    # but we want the failure to be loud at integration time, not silent).
+    assert headers["X-Cueapi-From-Agent"] == "sender@x"
+
+
+def test_messages_send_with_all_optionals(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201,
+                {"id": "msg_x", "delivery_state": "queued"},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "sender@x",
+            "--to", "recipient@y",
+            "--body", "the body",
+            "--subject", "the subject",
+            "--reply-to", "msg_abcdef123456",
+            "--priority", "5",
+            "--expects-reply",
+            "--reply-to-agent", "alt@x",
+            "--metadata", '{"k": "v"}',
+            "--idempotency-key", "idemp-key-1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {
+        "to": "recipient@y",
+        "body": "the body",
+        "subject": "the subject",
+        "reply_to": "msg_abcdef123456",
+        "priority": 5,
+        "expects_reply": True,
+        "reply_to_agent": "alt@x",
+        "metadata": {"k": "v"},
+    }
+    headers = holder["client"].calls[-1][3]
+    assert headers["X-Cueapi-From-Agent"] == "sender@x"
+    assert headers["Idempotency-Key"] == "idemp-key-1"
+
+
+def test_messages_send_omits_expects_reply_when_unset(monkeypatch):
+    # Default false MUST NOT appear in the body — server's Pydantic default
+    # is false, and sending `expects_reply: false` explicitly creates noise.
+    # Pinned so a refactor can't silently start always-sending the field.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "expects_reply" not in body
+
+
+def test_messages_send_priority_validated_by_click_intrange():
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi", "--priority", "9"],
+    )
+    assert result.exit_code != 0
+    # Click's IntRange error mentions the bounds.
+    assert "1" in result.output or "5" in result.output or "invalid" in result.output.lower()
+
+
+def test_messages_send_idempotency_key_too_long_rejected_client_side():
+    long_key = "x" * 256
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--idempotency-key", long_key,
+        ],
+    )
+    assert result.exit_code != 0
+    assert "255" in result.output or "characters" in result.output.lower()
+
+
+def test_messages_send_invalid_metadata_json():
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--metadata", "{not json",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "json" in result.output.lower()
+
+
+def test_messages_send_dedup_hit_renders_existing_label(monkeypatch):
+    # Server returns 200 (not 201) on Idempotency-Key dedup hit. The CLI
+    # should explicitly tell the user it was a dedup hit so they don't
+    # think a fresh send happened.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                200,
+                {"id": "msg_existing", "delivery_state": "delivered"},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--idempotency-key", "k1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (
+        "dedup" in result.output.lower()
+        or "existing" in result.output.lower()
+    )
+
+
+def test_messages_send_priority_downgrade_header_surfaced(monkeypatch):
+    # Server may downgrade priority>3 to 3 under receiver-pair limits and
+    # surfaces this via X-CueAPI-Priority-Downgraded: true. The CLI should
+    # show the user this happened so they can adapt without parsing body.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201,
+                {"id": "msg_x", "delivery_state": "queued", "priority": 3},
+                headers={"X-CueAPI-Priority-Downgraded": "true"},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--priority", "5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "downgrad" in result.output.lower()
+
+
+def test_messages_send_409_idempotency_key_conflict_helpful_error(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                409,
+                {"detail": {"error": {"code": "idempotency_key_conflict", "message": "conflict", "status": 409}}},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--idempotency-key", "k1",
+        ],
+    )
+    # Don't gate on exit code (echo_error doesn't change it in this codebase);
+    # check the user gets a hint about what went wrong.
+    assert (
+        "Idempotency-Key" in result.output
+        or "different body" in result.output
+        or "conflict" in result.output.lower()
+    )
+
+
+# --- get / read / ack ---
+
+
+def test_messages_get_renders_body_and_metadata(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/messages/msg_x"): lambda: _FakeResp(
+                200,
+                {
+                    "id": "msg_x",
+                    "delivery_state": "delivered",
+                    "from": {"slug": "sender@x", "agent_id": "agt_s"},
+                    "to": "recipient@y",
+                    "subject": "test subject",
+                    "thread_id": "thr_x",
+                    "priority": 4,
+                    "body": "the body content",
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["messages", "get", "msg_x"])
+    assert result.exit_code == 0
+    assert "msg_x" in result.output
+    assert "sender@x" in result.output
+    assert "recipient@y" in result.output
+    assert "test subject" in result.output
+    assert "the body content" in result.output
+
+
+def test_messages_get_404(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/messages/missing"): lambda: _FakeResp(404, {})
+        },
+    )
+    result = runner.invoke(main, ["messages", "get", "missing"])
+    assert "not found" in result.output.lower() or "missing" in result.output
+
+
+def test_messages_read(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages/msg_x/read"): lambda: _FakeResp(
+                200,
+                {"delivery_state": "read", "read_at": "2026-05-04T17:00:00Z"},
+            )
+        },
+    )
+    result = runner.invoke(main, ["messages", "read", "msg_x"])
+    assert result.exit_code == 0
+    assert "Marked read" in result.output or "msg_x" in result.output
+    assert "2026-05-04T17:00:00Z" in result.output
+
+
+def test_messages_read_409_terminal_state(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages/msg_x/read"): lambda: _FakeResp(
+                409,
+                {"detail": {"error": {"code": "invalid_transition", "message": "cannot read in terminal state", "status": 409}}},
+            )
+        },
+    )
+    result = runner.invoke(main, ["messages", "read", "msg_x"])
+    assert "terminal" in result.output.lower() or "cannot" in result.output.lower()
+
+
+def test_messages_ack(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages/msg_x/ack"): lambda: _FakeResp(
+                200,
+                {"delivery_state": "acked", "acked_at": "2026-05-04T17:01:00Z"},
+            )
+        },
+    )
+    result = runner.invoke(main, ["messages", "ack", "msg_x"])
+    assert result.exit_code == 0
+    assert "Acked" in result.output or "msg_x" in result.output
+    assert "2026-05-04T17:01:00Z" in result.output
+
+
+# --- top-level surface ---
+
+
+def test_top_level_help_lists_messages():
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "messages" in result.output
