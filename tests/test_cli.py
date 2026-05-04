@@ -1409,3 +1409,127 @@ def test_executions_get_omits_payload_when_null(monkeypatch):
     result = runner.invoke(main, ["executions", "get", "exec_abc"])
     assert result.exit_code == 0, result.output
     assert "Payload:" not in result.output
+
+
+# --- executions list filter parity (cueapi-cli #25 manifest gap) ---
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _ListClient:
+    def __init__(self):
+        self.last_params: Optional[dict] = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def get(self, path, params=None, **_):
+        self.last_params = params
+        return _FakeResp(200, {"executions": [], "total": 0, "limit": 20, "offset": 0})
+
+
+def _patched_list_client(monkeypatch, holder):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _ListClient()
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_executions_list_help_includes_new_filters():
+    result = runner.invoke(main, ["executions", "list", "--help"])
+    assert result.exit_code == 0
+    assert "--outcome-state" in result.output
+    assert "--result-type" in result.output
+    assert "--has-evidence" in result.output
+    assert "--triggered-by" in result.output
+
+
+def test_executions_list_outcome_state_passed_as_query_param(monkeypatch):
+    holder: dict = {}
+    _patched_list_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["executions", "list", "--outcome-state", "verified_success"],
+    )
+    assert result.exit_code == 0, result.output
+    assert holder["client"].last_params.get("outcome_state") == "verified_success"
+
+
+def test_executions_list_result_type_passed(monkeypatch):
+    holder: dict = {}
+    _patched_list_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["executions", "list", "--result-type", "pr"],
+    )
+    assert result.exit_code == 0, result.output
+    assert holder["client"].last_params.get("result_type") == "pr"
+
+
+def test_executions_list_has_evidence_only_sent_when_true(monkeypatch):
+    # has_evidence is a flag — present means True. Unset = omit. Pinning
+    # this so a refactor can't silently start sending `false` (which would
+    # still mean "no filter" server-side, but creates noisy URLs and invites
+    # future bugs).
+    holder: dict = {}
+    _patched_list_client(monkeypatch, holder)
+    result_no_flag = runner.invoke(main, ["executions", "list"])
+    assert result_no_flag.exit_code == 0
+    assert "has_evidence" not in (holder["client"].last_params or {})
+
+    holder2: dict = {}
+    _patched_list_client(monkeypatch, holder2)
+    result_with_flag = runner.invoke(main, ["executions", "list", "--has-evidence"])
+    assert result_with_flag.exit_code == 0
+    assert holder2["client"].last_params.get("has_evidence") == "true"
+
+
+def test_executions_list_triggered_by_passed(monkeypatch):
+    holder: dict = {}
+    _patched_list_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["executions", "list", "--triggered-by", "manual_fire"],
+    )
+    assert result.exit_code == 0, result.output
+    assert holder["client"].last_params.get("triggered_by") == "manual_fire"
+
+
+def test_executions_list_combines_all_filters(monkeypatch):
+    holder: dict = {}
+    _patched_list_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "executions", "list",
+            "--cue-id", "cue_xyz",
+            "--status", "success",
+            "--outcome-state", "verified_success",
+            "--result-type", "pr",
+            "--has-evidence",
+            "--triggered-by", "scheduled",
+            "--limit", "50",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    p = holder["client"].last_params
+    assert p["cue_id"] == "cue_xyz"
+    assert p["status"] == "success"
+    assert p["outcome_state"] == "verified_success"
+    assert p["result_type"] == "pr"
+    assert p["has_evidence"] == "true"
+    assert p["triggered_by"] == "scheduled"
+    assert p["limit"] == 50

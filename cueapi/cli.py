@@ -743,10 +743,48 @@ def executions() -> None:
 @executions.command(name="list")
 @click.option("--cue-id", "cue_id", default=None, help="Filter to a specific cue")
 @click.option("--status", default=None, help="Filter by execution status")
+@click.option(
+    "--outcome-state",
+    "outcome_state",
+    default=None,
+    help=(
+        "Filter by outcome_state: reported_success / reported_failure / "
+        "verified_success / verification_pending / verification_failed / unknown."
+    ),
+)
+@click.option(
+    "--result-type",
+    "result_type",
+    default=None,
+    help="Filter by evidence result_type (e.g. 'pr', 'issue', 'comment').",
+)
+@click.option(
+    "--has-evidence",
+    "has_evidence",
+    is_flag=True,
+    default=False,
+    help="Filter to executions that reported evidence (evidence_external_id is set).",
+)
+@click.option(
+    "--triggered-by",
+    "triggered_by",
+    default=None,
+    help="Filter by triggered_by: scheduled / manual_fire / chain.",
+)
 @click.option("--limit", default=20, type=int, help="Max results")
 @click.option("--offset", default=0, type=int, help="Offset for pagination")
 @click.pass_context
-def executions_list(ctx: click.Context, cue_id: Optional[str], status: Optional[str], limit: int, offset: int) -> None:
+def executions_list(
+    ctx: click.Context,
+    cue_id: Optional[str],
+    status: Optional[str],
+    outcome_state: Optional[str],
+    result_type: Optional[str],
+    has_evidence: bool,
+    triggered_by: Optional[str],
+    limit: int,
+    offset: int,
+) -> None:
     """List historical executions across all cues."""
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
@@ -755,6 +793,18 @@ def executions_list(ctx: click.Context, cue_id: Optional[str], status: Optional[
                 params["cue_id"] = cue_id
             if status:
                 params["status"] = status
+            if outcome_state:
+                params["outcome_state"] = outcome_state
+            if result_type:
+                params["result_type"] = result_type
+            # Server-side `has_evidence` filter is meaningful only when True
+            # (it ANDs `evidence_external_id IS NOT NULL`). Unset = no filter,
+            # so omit from query params when False rather than send `false`
+            # which would still mean the same thing but adds URL noise.
+            if has_evidence:
+                params["has_evidence"] = "true"
+            if triggered_by:
+                params["triggered_by"] = triggered_by
             resp = client.get("/executions", params=params)
             if resp.status_code != 200:
                 echo_error(f"Failed (HTTP {resp.status_code})")
