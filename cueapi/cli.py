@@ -82,6 +82,33 @@ def quickstart(ctx: click.Context) -> None:
 @click.option("--description", default=None, help="Cue description")
 @click.option("--worker", is_flag=True, default=False, help="Use worker transport (no public URL needed)")
 @click.option("--on-failure", "on_failure", default=None, help="JSON on_failure config, e.g. '{\"email\": false, \"pause\": true}'")
+@click.option(
+    "--delivery",
+    default=None,
+    help='JSON delivery config (timeout_seconds, outcome_deadline_seconds), e.g. \'{"timeout_seconds": 60}\'',
+)
+@click.option("--alerts", default=None, help="JSON alert config blob")
+@click.option(
+    "--catch-up",
+    "catch_up",
+    default=None,
+    type=click.Choice(["run_once_if_missed", "skip_missed", "replay_all"]),
+    help="Catch-up policy for missed scheduled fires (default: run_once_if_missed).",
+)
+@click.option(
+    "--verification",
+    default=None,
+    help='JSON verification config (mode, required_assertions), e.g. \'{"mode": "evidence_required"}\'',
+)
+@click.option(
+    "--on-success-fire",
+    "on_success_fire",
+    default=None,
+    help=(
+        "Cue ID to fire when an execution of THIS cue reaches a successful terminal state. "
+        "Strictly 1:1 chaining; the target cue is validated at create time."
+    ),
+)
 @click.pass_context
 def create(
     ctx: click.Context,
@@ -95,6 +122,11 @@ def create(
     description: Optional[str],
     worker: bool,
     on_failure: Optional[str],
+    delivery: Optional[str],
+    alerts: Optional[str],
+    catch_up: Optional[str],
+    verification: Optional[str],
+    on_success_fire: Optional[str],
 ) -> None:
     """Create a new cue."""
     if cron and at_time:
@@ -136,6 +168,30 @@ def create(
             body["on_failure"] = json.loads(on_failure)
         except json.JSONDecodeError:
             raise click.UsageError("--on-failure must be valid JSON")
+
+    if delivery:
+        try:
+            body["delivery"] = json.loads(delivery)
+        except json.JSONDecodeError:
+            raise click.UsageError("--delivery must be valid JSON")
+
+    if alerts:
+        try:
+            body["alerts"] = json.loads(alerts)
+        except json.JSONDecodeError:
+            raise click.UsageError("--alerts must be valid JSON")
+
+    if catch_up:
+        body["catch_up"] = catch_up
+
+    if verification:
+        try:
+            body["verification"] = json.loads(verification)
+        except json.JSONDecodeError:
+            raise click.UsageError("--verification must be valid JSON")
+
+    if on_success_fire:
+        body["on_success_fire"] = on_success_fire
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
@@ -406,11 +462,49 @@ def fire(ctx: click.Context, cue_id: str, payload_override: Optional[str], merge
 @click.option("--payload", default=None, help="New JSON payload")
 @click.option("--description", default=None, help="New description")
 @click.option("--on-failure", "on_failure", default=None, help="JSON on_failure config")
+@click.option(
+    "--status",
+    default=None,
+    type=click.Choice(["active", "paused"]),
+    help="New status (alternative to `cueapi pause` / `cueapi resume`).",
+)
+@click.option("--delivery", default=None, help="JSON delivery config")
+@click.option("--alerts", default=None, help="JSON alert config")
+@click.option(
+    "--catch-up",
+    "catch_up",
+    default=None,
+    type=click.Choice(["run_once_if_missed", "skip_missed", "replay_all"]),
+    help="Catch-up policy for missed scheduled fires.",
+)
+@click.option("--verification", default=None, help="JSON verification config")
+@click.option(
+    "--on-success-fire",
+    "on_success_fire",
+    default=None,
+    help="Cue ID to fire when this cue's executions succeed (1:1 chaining).",
+)
+@click.option(
+    "--clear-on-success-fire",
+    "clear_on_success_fire",
+    is_flag=True,
+    default=False,
+    help="Clear on_success_fire (disable chaining). Mutually exclusive with --on-success-fire.",
+)
 @click.pass_context
 def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[str],
            url: Optional[str], payload: Optional[str], description: Optional[str],
-           on_failure: Optional[str]) -> None:
+           on_failure: Optional[str],
+           status: Optional[str],
+           delivery: Optional[str],
+           alerts: Optional[str],
+           catch_up: Optional[str],
+           verification: Optional[str],
+           on_success_fire: Optional[str],
+           clear_on_success_fire: bool) -> None:
     """Update an existing cue."""
+    if on_success_fire and clear_on_success_fire:
+        raise click.UsageError("--on-success-fire and --clear-on-success-fire are mutually exclusive.")
     body: dict = {}
     if name:
         body["name"] = name
@@ -430,6 +524,31 @@ def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[
             body["on_failure"] = json.loads(on_failure)
         except json.JSONDecodeError:
             raise click.UsageError("--on-failure must be valid JSON")
+    if status:
+        body["status"] = status
+    if delivery:
+        try:
+            body["delivery"] = json.loads(delivery)
+        except json.JSONDecodeError:
+            raise click.UsageError("--delivery must be valid JSON")
+    if alerts:
+        try:
+            body["alerts"] = json.loads(alerts)
+        except json.JSONDecodeError:
+            raise click.UsageError("--alerts must be valid JSON")
+    if catch_up:
+        body["catch_up"] = catch_up
+    if verification:
+        try:
+            body["verification"] = json.loads(verification)
+        except json.JSONDecodeError:
+            raise click.UsageError("--verification must be valid JSON")
+    if on_success_fire:
+        body["on_success_fire"] = on_success_fire
+    elif clear_on_success_fire:
+        # Server uses None to disable chaining; sentinel pattern. Send literal
+        # null in JSON.
+        body["on_success_fire"] = None
 
     if not body:
         raise click.UsageError("Must specify at least one field to update.")
