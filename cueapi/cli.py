@@ -1075,6 +1075,131 @@ def executions_report_outcome(
         click.echo(str(e))
 
 
+@executions.command(name="replay")
+@click.argument("execution_id")
+@click.pass_context
+def executions_replay(ctx: click.Context, execution_id: str) -> None:
+    """Replay a terminal execution.
+
+    Creates a fresh execution against the same cue with the original
+    payload_override carried forward. Only valid for terminal states
+    (success / failed / missed / outcome_timeout); 409 if the execution
+    is still in flight.
+    """
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/executions/{execution_id}/replay", json={})
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success(f"Replayed: {execution_id}")
+                if data.get("execution_id"):
+                    echo_info("New execution:", data["execution_id"])
+                if data.get("scheduled_for"):
+                    echo_info("Scheduled:", data["scheduled_for"])
+                echo_info("Status:", data.get("status", "?"))
+                if data.get("triggered_by"):
+                    echo_info("Triggered by:", data["triggered_by"])
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Execution not found: {execution_id}")
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Cannot replay an execution still in flight"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@executions.command(name="verification-pending")
+@click.argument("execution_id")
+@click.pass_context
+def executions_verification_pending(ctx: click.Context, execution_id: str) -> None:
+    """Mark an execution's outcome verification as pending."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/executions/{execution_id}/verification-pending", json={})
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success(f"Marked verification-pending: {execution_id}")
+                if data.get("outcome_state"):
+                    echo_info("Outcome state:", data["outcome_state"])
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Execution not found: {execution_id}")
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Cannot transition from current outcome_state"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@executions.command(name="verify")
+@click.argument("execution_id")
+@click.option(
+    "--valid/--invalid",
+    "valid",
+    default=None,
+    help=(
+        "Mark verification result. --valid (default behavior, transitions to "
+        "verified_success) or --invalid (transitions to verification_failed). "
+        "Omitting either flag uses the server default (valid=true)."
+    ),
+)
+@click.option(
+    "--reason",
+    default=None,
+    help=(
+        "Optional human-readable reason (max 500 chars). Most useful with "
+        "--invalid to record why verification failed."
+    ),
+)
+@click.pass_context
+def executions_verify(
+    ctx: click.Context,
+    execution_id: str,
+    valid: Optional[bool],
+    reason: Optional[str],
+) -> None:
+    """Verify or invalidate an execution's evidence."""
+    if reason is not None and len(reason) > 500:
+        raise click.UsageError("--reason must be ≤500 characters")
+    body: dict = {}
+    if valid is not None:
+        body["valid"] = valid
+    if reason:
+        body["reason"] = reason
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/executions/{execution_id}/verify", json=body)
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                if valid is False:
+                    echo_success(f"Marked verification-failed: {execution_id}")
+                else:
+                    echo_success(f"Verified: {execution_id}")
+                if data.get("outcome_state"):
+                    echo_info("Outcome state:", data["outcome_state"])
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Execution not found: {execution_id}")
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Cannot transition from current outcome_state"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
 main.add_command(executions)
 
 

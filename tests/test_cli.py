@@ -1533,3 +1533,221 @@ def test_executions_list_combines_all_filters(monkeypatch):
     assert p["has_evidence"] == "true"
     assert p["triggered_by"] == "scheduled"
     assert p["limit"] == 50
+
+
+# --- executions: replay / verification-pending / verify ---
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: Any):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _ExecClient:
+    def __init__(self, responses: Optional[dict] = None):
+        self.calls: list = []
+        self._responses = responses or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def _resolve(self, method: str, path: str):
+        for (m, p), factory in sorted(self._responses.items(), key=lambda kv: -len(kv[0][1])):
+            if m == method and path.startswith(p):
+                return factory()
+        return _FakeResp(200, {})
+
+    def post(self, path, json=None, **_):
+        self.calls.append(("POST", path, json))
+        return self._resolve("POST", path)
+
+    def get(self, path, params=None, **_):
+        self.calls.append(("GET", path, params))
+        return self._resolve("GET", path)
+
+
+def _patch_exec_client(monkeypatch, holder, responses=None):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _ExecClient(responses=responses)
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_executions_replay_help():
+    result = runner.invoke(main, ["executions", "replay", "--help"])
+    assert result.exit_code == 0
+    assert "execution_id" in result.output.lower()
+
+
+def test_executions_verification_pending_help():
+    result = runner.invoke(main, ["executions", "verification-pending", "--help"])
+    assert result.exit_code == 0
+    assert "execution_id" in result.output.lower()
+
+
+def test_executions_verify_help_lists_flags():
+    result = runner.invoke(main, ["executions", "verify", "--help"])
+    assert result.exit_code == 0
+    assert "--valid" in result.output
+    assert "--invalid" in result.output
+    assert "--reason" in result.output
+
+
+def test_executions_replay_posts_empty_body(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/replay"): lambda: _FakeResp(
+                200,
+                {
+                    "execution_id": "exec_new",
+                    "scheduled_for": "2026-05-04T17:30:00Z",
+                    "status": "pending",
+                    "triggered_by": "replay",
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["executions", "replay", "exec_x"])
+    assert result.exit_code == 0, result.output
+    method, path, body = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/executions/exec_x/replay"
+    assert body == {}
+    assert "exec_new" in result.output
+
+
+def test_executions_replay_409_inflight_helpful_error(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/replay"): lambda: _FakeResp(
+                409,
+                {"detail": {"error": {"code": "execution_in_flight", "message": "still in progress", "status": 409}}},
+            )
+        },
+    )
+    result = runner.invoke(main, ["executions", "replay", "exec_x"])
+    assert "in flight" in result.output.lower() or "in progress" in result.output.lower()
+
+
+def test_executions_verification_pending_posts_empty_body(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/verification-pending"): lambda: _FakeResp(
+                200, {"outcome_state": "verification_pending"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["executions", "verification-pending", "exec_x"])
+    assert result.exit_code == 0, result.output
+    method, path, body = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/executions/exec_x/verification-pending"
+    assert body == {}
+    assert "verification_pending" in result.output
+
+
+def test_executions_verify_default_omits_valid_field(monkeypatch):
+    # No --valid / --invalid flag → body should be empty so the server's
+    # legacy default (valid=true) applies. Pinned so a refactor can't
+    # silently start always-sending the field.
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/verify"): lambda: _FakeResp(
+                200, {"outcome_state": "verified_success"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["executions", "verify", "exec_x"])
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {}
+
+
+def test_executions_verify_invalid_sends_false(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/verify"): lambda: _FakeResp(
+                200, {"outcome_state": "verification_failed"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["executions", "verify", "exec_x", "--invalid", "--reason", "evidence missing"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {"valid": False, "reason": "evidence missing"}
+    assert "verification_failed" in result.output or "verification-failed" in result.output
+
+
+def test_executions_verify_explicit_valid_sends_true(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/exec_x/verify"): lambda: _FakeResp(
+                200, {"outcome_state": "verified_success"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["executions", "verify", "exec_x", "--valid"])
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {"valid": True}
+
+
+def test_executions_verify_reason_too_long_rejected_client_side():
+    long_reason = "x" * 501
+    result = runner.invoke(
+        main,
+        ["executions", "verify", "exec_x", "--reason", long_reason],
+    )
+    assert result.exit_code != 0
+    assert "500" in result.output or "characters" in result.output.lower()
+
+
+def test_executions_verify_404(monkeypatch):
+    holder: dict = {}
+    _patch_exec_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/executions/missing/verify"): lambda: _FakeResp(404, {})
+        },
+    )
+    result = runner.invoke(main, ["executions", "verify", "missing"])
+    assert "not found" in result.output.lower() or "missing" in result.output
+
+
+def test_executions_group_help_includes_new_subcommands():
+    result = runner.invoke(main, ["executions", "--help"])
+    assert result.exit_code == 0
+    for sub in ("replay", "verification-pending", "verify"):
+        assert sub in result.output, f"executions subcommand {sub} missing"
