@@ -861,5 +861,405 @@ def regenerate(ctx: click.Context, yes: bool) -> None:
 main.add_command(key)
 
 
+# --- Messaging primitive: agents command group ---
+#
+# Mirrors `app/routers/agents.py` in cueapi-hosted. v1 surface covers CRUD
+# + webhook-secret management + inbox/sent message lists. The send/get/read/
+# ack message lifecycle is in a sibling `cueapi messages` group (separate PR).
+
+
+@main.group()
+def agents() -> None:
+    """Manage agents (messaging primitive: identity + webhook secret + inbox)."""
+    pass
+
+
+@agents.command(name="create")
+@click.option("--display-name", "display_name", required=True, help="Human-readable name (required, 1-255 chars)")
+@click.option("--slug", default=None, help="Per-user unique slug (optional; server derives from display-name when omitted)")
+@click.option("--webhook-url", "webhook_url", default=None, help="Push-delivery target. SSRF-validated. Omit for poll-only.")
+@click.option("--metadata", default=None, help="JSON metadata blob")
+@click.pass_context
+def agents_create(
+    ctx: click.Context,
+    display_name: str,
+    slug: Optional[str],
+    webhook_url: Optional[str],
+    metadata: Optional[str],
+) -> None:
+    """Create an agent.
+
+    Webhook secret is returned ONLY in this response when --webhook-url is set.
+    Subsequent reads omit the secret. Save it now or use webhook-secret regenerate
+    to mint a new one (which will revoke the old one).
+    """
+    body: dict = {"display_name": display_name}
+    if slug:
+        body["slug"] = slug
+    if webhook_url:
+        body["webhook_url"] = webhook_url
+    if metadata:
+        try:
+            body["metadata"] = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise click.UsageError("--metadata must be valid JSON")
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post("/agents", json=body)
+            if resp.status_code == 201:
+                a = resp.json()
+                click.echo()
+                echo_success(f"Created: {a['id']} ({a['slug']})")
+                echo_info("Display name:", a["display_name"])
+                echo_info("Status:", a.get("status", "?"))
+                if a.get("webhook_url"):
+                    echo_info("Webhook URL:", a["webhook_url"])
+                if a.get("webhook_secret"):
+                    # One-time view — only on create + on regenerate. Tell the
+                    # user explicitly so they know to copy it now.
+                    click.echo()
+                    echo_info("Webhook secret (save now — only shown once):", a["webhook_secret"])
+                click.echo()
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="list")
+@click.option("--status", default=None, type=click.Choice(["online", "offline", "away"]), help="Filter by status")
+@click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
+@click.option("--limit", default=50, type=int, help="Max results (default 50, max 100)")
+@click.option("--offset", default=0, type=int, help="Offset for pagination")
+@click.pass_context
+def agents_list(
+    ctx: click.Context,
+    status: Optional[str],
+    include_deleted: bool,
+    limit: int,
+    offset: int,
+) -> None:
+    """List your agents."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            params: dict = {"limit": limit, "offset": offset}
+            if status:
+                params["status"] = status
+            # Same pattern as `executions list --has-evidence`: only send when
+            # True. The server's default is False; sending `false` is no-op
+            # and adds URL noise.
+            if include_deleted:
+                params["include_deleted"] = "true"
+            resp = client.get("/agents", params=params)
+            if resp.status_code != 200:
+                echo_error(f"Failed to list agents (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            agents_list_data = data.get("agents", [])
+            if not agents_list_data:
+                click.echo("\nNo agents yet. Create your first one:")
+                click.echo('  cueapi agents create --display-name "my-agent"\n')
+                return
+            click.echo()
+            rows = []
+            for a in agents_list_data:
+                rows.append([
+                    a.get("id", "?"),
+                    a.get("slug", "?"),
+                    a.get("display_name", "?"),
+                    format_status(a.get("status", "?")),
+                ])
+            echo_table(["ID", "SLUG", "DISPLAY NAME", "STATUS"], rows, widths=[24, 24, 28, 12])
+            total = data.get("total", len(agents_list_data))
+            click.echo(f"\n{total} agents\n")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="get")
+@click.argument("ref")
+@click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
+@click.pass_context
+def agents_get(ctx: click.Context, ref: str, include_deleted: bool) -> None:
+    """Get an agent by opaque ID or slug-form (agent@user)."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            params: dict = {}
+            if include_deleted:
+                params["include_deleted"] = "true"
+            resp = client.get(f"/agents/{ref}", params=params)
+            if resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            a = resp.json()
+            click.echo()
+            echo_info("ID:", a.get("id", "?"))
+            echo_info("Slug:", a.get("slug", "?"))
+            echo_info("Display name:", a.get("display_name", "?"))
+            echo_info("Status:", format_status(a.get("status", "?")))
+            if a.get("webhook_url"):
+                echo_info("Webhook URL:", a["webhook_url"])
+            else:
+                echo_info("Webhook URL:", "— (poll-only)")
+            if a.get("metadata"):
+                echo_info("Metadata:", json.dumps(a["metadata"], indent=2, sort_keys=True))
+            if a.get("deleted_at"):
+                echo_info("Deleted at:", a["deleted_at"])
+            click.echo()
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="update")
+@click.argument("ref")
+@click.option("--display-name", "display_name", default=None, help="New display name")
+@click.option("--webhook-url", "webhook_url", default=None, help="New webhook URL (push-delivery target)")
+@click.option(
+    "--clear-webhook-url",
+    "clear_webhook_url",
+    is_flag=True,
+    default=False,
+    help="Clear webhook_url (revert to poll-only). Mutually exclusive with --webhook-url.",
+)
+@click.option("--status", default=None, type=click.Choice(["online", "offline", "away"]), help="New status")
+@click.option("--metadata", default=None, help="New JSON metadata blob")
+@click.pass_context
+def agents_update(
+    ctx: click.Context,
+    ref: str,
+    display_name: Optional[str],
+    webhook_url: Optional[str],
+    clear_webhook_url: bool,
+    status: Optional[str],
+    metadata: Optional[str],
+) -> None:
+    """Update an agent. PATCH semantics — omit fields you don't want to change."""
+    if webhook_url and clear_webhook_url:
+        raise click.UsageError("--webhook-url and --clear-webhook-url are mutually exclusive.")
+    body: dict = {}
+    if display_name:
+        body["display_name"] = display_name
+    if webhook_url:
+        body["webhook_url"] = webhook_url
+    elif clear_webhook_url:
+        # Server uses the explicit-null sentinel pattern (model_fields_set
+        # disambiguates "omitted" from "set to null"). Send literal None
+        # in JSON to clear.
+        body["webhook_url"] = None
+    if status:
+        body["status"] = status
+    if metadata:
+        try:
+            body["metadata"] = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise click.UsageError("--metadata must be valid JSON")
+    if not body:
+        raise click.UsageError("Must specify at least one field to update.")
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.patch(f"/agents/{ref}", json=body)
+            if resp.status_code == 200:
+                a = resp.json()
+                echo_success(f"Updated: {a.get('id', ref)} ({a.get('slug', '?')})")
+            elif resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="delete")
+@click.argument("ref")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.pass_context
+def agents_delete(ctx: click.Context, ref: str, yes: bool) -> None:
+    """Soft-delete an agent. Pass --yes to skip the confirmation prompt."""
+    if not yes:
+        if not click.confirm(f"Delete agent {ref}?"):
+            click.echo("Aborted.")
+            return
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.delete(f"/agents/{ref}")
+            if resp.status_code == 204:
+                echo_success(f"Deleted: {ref}")
+            elif resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+            else:
+                # Best-effort error parsing — DELETE responses typically don't
+                # carry a body but a JSON 4xx might.
+                try:
+                    error = resp.json().get("detail", {}).get("error", {})
+                    echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+                except Exception:
+                    echo_error(f"Failed (HTTP {resp.status_code})")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.group(name="webhook-secret")
+def agents_webhook_secret() -> None:
+    """Manage an agent's webhook signing secret."""
+    pass
+
+
+@agents_webhook_secret.command(name="get")
+@click.argument("ref")
+@click.pass_context
+def agents_webhook_secret_get(ctx: click.Context, ref: str) -> None:
+    """Reveal the agent's webhook signing secret (the agent must own a webhook_url)."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.get(f"/agents/{ref}/webhook-secret")
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_info("Webhook secret:", data.get("webhook_secret", "?"))
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Agent not found or has no webhook secret: {ref}")
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents_webhook_secret.command(name="regenerate")
+@click.argument("ref")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.pass_context
+def agents_webhook_secret_regenerate(ctx: click.Context, ref: str, yes: bool) -> None:
+    """Rotate the agent's webhook signing secret (revokes the current secret)."""
+    if not yes:
+        if not click.confirm(f"Rotate webhook secret for {ref}? Current secret will be revoked immediately."):
+            click.echo("Aborted.")
+            return
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(f"/agents/{ref}/webhook-secret/regenerate", json={})
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success(f"Rotated webhook secret for {ref}")
+                echo_info("New webhook secret (save now — only shown once):", data.get("webhook_secret", "?"))
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="inbox")
+@click.argument("ref")
+@click.option(
+    "--state",
+    default=None,
+    help="Filter by message state (e.g. queued / delivered / read / acked / failed)",
+)
+@click.option("--limit", default=50, type=int, help="Max results")
+@click.option("--offset", default=0, type=int, help="Offset for pagination")
+@click.pass_context
+def agents_inbox(
+    ctx: click.Context,
+    ref: str,
+    state: Optional[str],
+    limit: int,
+    offset: int,
+) -> None:
+    """Poll an agent's inbox (incoming messages)."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            params: dict = {"limit": limit, "offset": offset}
+            if state:
+                params["state"] = state
+            resp = client.get(f"/agents/{ref}/inbox", params=params)
+            if resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            messages = data.get("messages", [])
+            if not messages:
+                click.echo("\nInbox empty.\n")
+                return
+            click.echo()
+            rows = []
+            for m in messages:
+                from_ref = m.get("from") or {}
+                from_label = from_ref.get("slug") or from_ref.get("agent_id", "?")
+                subject = (m.get("subject") or "(no subject)")[:30]
+                rows.append([
+                    m.get("id", "?"),
+                    from_label,
+                    subject,
+                    format_status(m.get("state", "?")),
+                ])
+            echo_table(["ID", "FROM", "SUBJECT", "STATE"], rows, widths=[20, 22, 32, 12])
+            total = data.get("total", len(messages))
+            click.echo(f"\n{total} messages\n")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="sent")
+@click.argument("ref")
+@click.option("--limit", default=50, type=int, help="Max results")
+@click.option("--offset", default=0, type=int, help="Offset for pagination")
+@click.pass_context
+def agents_sent(
+    ctx: click.Context,
+    ref: str,
+    limit: int,
+    offset: int,
+) -> None:
+    """List messages sent by an agent."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            params: dict = {"limit": limit, "offset": offset}
+            resp = client.get(f"/agents/{ref}/sent", params=params)
+            if resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            messages = data.get("messages", [])
+            if not messages:
+                click.echo("\nNo sent messages.\n")
+                return
+            click.echo()
+            rows = []
+            for m in messages:
+                to_ref = m.get("to") or "?"
+                subject = (m.get("subject") or "(no subject)")[:30]
+                rows.append([
+                    m.get("id", "?"),
+                    to_ref,
+                    subject,
+                    format_status(m.get("state", "?")),
+                ])
+            echo_table(["ID", "TO", "SUBJECT", "STATE"], rows, widths=[20, 22, 32, 12])
+            total = data.get("total", len(messages))
+            click.echo(f"\n{total} messages\n")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+main.add_command(agents)
+
+
 if __name__ == "__main__":
     main()
