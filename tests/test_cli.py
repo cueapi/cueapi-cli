@@ -925,3 +925,220 @@ def test_key_webhook_secret_regenerate_aborts_without_yes():
         input="n\n",
     )
     assert "Aborted" in result.output or "aborted" in result.output.lower()
+
+
+# --- create / update extra flags (parity with hosted CueCreate / CueUpdate) ---
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: Any):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _CueClient:
+    """Captures POST/PATCH for cue create/update body assertions."""
+
+    def __init__(self):
+        self.posted: list = []
+        self.patched: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def post(self, path, json=None, **_):
+        self.posted.append((path, json))
+        return _FakeResp(201, {"id": "cue_test", "status": "active", "next_run": None})
+
+    def patch(self, path, json=None, **_):
+        self.patched.append((path, json))
+        return _FakeResp(200, {"id": "cue_test", "name": (json or {}).get("name") or "x"})
+
+    def get(self, *_, **__):
+        return _FakeResp(200, {})
+
+
+def _patch_cue_client(monkeypatch, holder):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _CueClient()
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+# --- help-text shape ---
+
+
+def test_create_help_lists_new_flags():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    for flag in ("--delivery", "--alerts", "--catch-up", "--verification", "--on-success-fire"):
+        assert flag in result.output, f"create missing {flag}"
+
+
+def test_update_help_lists_new_flags():
+    result = runner.invoke(main, ["update", "--help"])
+    assert result.exit_code == 0
+    for flag in (
+        "--status",
+        "--delivery",
+        "--alerts",
+        "--catch-up",
+        "--verification",
+        "--on-success-fire",
+        "--clear-on-success-fire",
+    ):
+        assert flag in result.output, f"update missing {flag}"
+
+
+# --- create body construction ---
+
+
+def test_create_with_all_new_flags(monkeypatch):
+    holder: dict = {}
+    _patch_cue_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "create",
+            "--name", "x",
+            "--cron", "0 9 * * *",
+            "--worker",
+            "--delivery", '{"timeout_seconds": 60}',
+            "--alerts", '{"channels": ["email"]}',
+            "--catch-up", "skip_missed",
+            "--verification", '{"mode": "evidence_required"}',
+            "--on-success-fire", "cue_chained",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert body["delivery"] == {"timeout_seconds": 60}
+    assert body["alerts"] == {"channels": ["email"]}
+    assert body["catch_up"] == "skip_missed"
+    assert body["verification"] == {"mode": "evidence_required"}
+    assert body["on_success_fire"] == "cue_chained"
+
+
+def test_create_catch_up_validated_by_click():
+    result = runner.invoke(
+        main,
+        ["create", "--name", "x", "--cron", "0 9 * * *", "--worker", "--catch-up", "garbage"],
+    )
+    assert result.exit_code != 0
+    assert (
+        "garbage" in result.output.lower()
+        or "invalid" in result.output.lower()
+        or "run_once_if_missed" in result.output
+    )
+
+
+def test_create_invalid_delivery_json():
+    result = runner.invoke(
+        main,
+        ["create", "--name", "x", "--cron", "0 9 * * *", "--worker", "--delivery", "{not json"],
+    )
+    assert result.exit_code != 0
+    assert "json" in result.output.lower()
+
+
+def test_create_omits_unset_flags_from_body(monkeypatch):
+    holder: dict = {}
+    _patch_cue_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["create", "--name", "x", "--cron", "0 9 * * *", "--worker"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].posted[-1][1]
+    for k in ("delivery", "alerts", "catch_up", "verification", "on_success_fire"):
+        assert k not in body, f"create body should omit {k} when unset"
+
+
+# --- update body construction ---
+
+
+def test_update_status_via_flag(monkeypatch):
+    holder: dict = {}
+    _patch_cue_client(monkeypatch, holder)
+    result = runner.invoke(main, ["update", "cue_test", "--status", "paused"])
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert body == {"status": "paused"}
+
+
+def test_update_status_validated_by_click():
+    result = runner.invoke(main, ["update", "cue_test", "--status", "deleted"])
+    assert result.exit_code != 0
+    assert (
+        "deleted" in result.output.lower()
+        or "invalid" in result.output.lower()
+        or "active" in result.output
+    )
+
+
+def test_update_with_all_new_flags(monkeypatch):
+    holder: dict = {}
+    _patch_cue_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "update", "cue_test",
+            "--status", "active",
+            "--delivery", '{"timeout_seconds": 90}',
+            "--alerts", '{"channels": ["slack"]}',
+            "--catch-up", "replay_all",
+            "--verification", '{"mode": "manual"}',
+            "--on-success-fire", "cue_next",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert body == {
+        "status": "active",
+        "delivery": {"timeout_seconds": 90},
+        "alerts": {"channels": ["slack"]},
+        "catch_up": "replay_all",
+        "verification": {"mode": "manual"},
+        "on_success_fire": "cue_next",
+    }
+
+
+def test_update_clear_on_success_fire_sends_null(monkeypatch):
+    # Mirrors the agent --clear-webhook-url pattern. Server uses None to
+    # disable chaining; the CLI must send literal JSON null, not omit.
+    # Pinned so a refactor can't silently flip semantics.
+    holder: dict = {}
+    _patch_cue_client(monkeypatch, holder)
+    result = runner.invoke(main, ["update", "cue_test", "--clear-on-success-fire"])
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert "on_success_fire" in body
+    assert body["on_success_fire"] is None
+
+
+def test_update_on_success_fire_and_clear_mutually_exclusive():
+    result = runner.invoke(
+        main,
+        ["update", "cue_test", "--on-success-fire", "cue_x", "--clear-on-success-fire"],
+    )
+    assert result.exit_code != 0
+    assert "mutually" in result.output.lower() or "exclusive" in result.output.lower()
+
+
+def test_update_catch_up_validated_by_click():
+    result = runner.invoke(main, ["update", "cue_test", "--catch-up", "wat"])
+    assert result.exit_code != 0
+    assert (
+        "wat" in result.output.lower()
+        or "invalid" in result.output.lower()
+        or "run_once_if_missed" in result.output
+    )
