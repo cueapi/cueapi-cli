@@ -454,8 +454,24 @@ def delete(ctx: click.Context, cue_id: str, yes: bool) -> None:
 @click.argument("cue_id")
 @click.option("--payload-override", "payload_override", default=None, help="JSON payload override for this fire only")
 @click.option("--merge-strategy", "merge_strategy", type=click.Choice(["merge", "replace"]), default=None, help="How payload-override combines with the cue's stored payload (default: merge, server-side)")
+@click.option(
+    "--send-at",
+    "send_at",
+    default=None,
+    help=(
+        "Optional UTC timestamp (ISO 8601) to schedule this fire for the future. "
+        "Server gates dispatch until send-at <= now. Past timestamps are treated as "
+        "'fire now' (idempotent — no error). Hosted PR #618."
+    ),
+)
 @click.pass_context
-def fire(ctx: click.Context, cue_id: str, payload_override: Optional[str], merge_strategy: Optional[str]) -> None:
+def fire(
+    ctx: click.Context,
+    cue_id: str,
+    payload_override: Optional[str],
+    merge_strategy: Optional[str],
+    send_at: Optional[str],
+) -> None:
     """Fire an existing cue immediately, optionally overriding its payload."""
     body: dict = {}
     if payload_override:
@@ -465,6 +481,8 @@ def fire(ctx: click.Context, cue_id: str, payload_override: Optional[str], merge
             raise click.UsageError("--payload-override must be valid JSON")
     if merge_strategy:
         body["merge_strategy"] = merge_strategy
+    if send_at:
+        body["send_at"] = send_at
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:

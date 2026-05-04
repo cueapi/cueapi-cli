@@ -2160,3 +2160,81 @@ def test_top_level_help_lists_messages():
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "messages" in result.output
+
+
+# --- fire --send-at (hosted PR #618 port) ---
+
+
+class _FireSendAtClient:
+    def __init__(self):
+        self.last_body: Optional[dict] = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def post(self, path, json=None, **_):
+        self.last_body = json
+        class _R:
+            status_code = 200
+            def json(self):
+                return {"id": "exec_test", "scheduled_for": "2026-05-04T20:00:00Z"}
+        return _R()
+
+
+def _patch_fire_client(monkeypatch, holder):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _FireSendAtClient()
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_fire_help_lists_send_at():
+    result = runner.invoke(main, ["fire", "--help"])
+    assert result.exit_code == 0
+    assert "--send-at" in result.output
+
+
+def test_fire_send_at_passed_to_body(monkeypatch):
+    holder: dict = {}
+    _patch_fire_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["fire", "cue_x", "--send-at", "2026-05-04T20:00:00Z"],
+    )
+    assert result.exit_code == 0, result.output
+    assert holder["client"].last_body == {"send_at": "2026-05-04T20:00:00Z"}
+
+
+def test_fire_omits_send_at_when_unset(monkeypatch):
+    # Pin: when --send-at isn't passed, the body must not include the key.
+    holder: dict = {}
+    _patch_fire_client(monkeypatch, holder)
+    result = runner.invoke(main, ["fire", "cue_x"])
+    assert result.exit_code == 0
+    assert "send_at" not in (holder["client"].last_body or {})
+
+
+def test_fire_combines_send_at_with_payload_override(monkeypatch):
+    holder: dict = {}
+    _patch_fire_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "fire", "cue_x",
+            "--payload-override", '{"task": "demo"}',
+            "--merge-strategy", "replace",
+            "--send-at", "2026-05-04T22:00:00Z",
+        ],
+    )
+    assert result.exit_code == 0
+    assert holder["client"].last_body == {
+        "payload_override": {"task": "demo"},
+        "merge_strategy": "replace",
+        "send_at": "2026-05-04T22:00:00Z",
+    }
