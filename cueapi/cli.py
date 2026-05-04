@@ -858,6 +858,85 @@ def regenerate(ctx: click.Context, yes: bool) -> None:
     )
 
 
+@key.group(name="webhook-secret")
+def key_webhook_secret() -> None:
+    """Manage the user-level webhook signing secret (legacy /v1/auth/webhook-secret).
+
+    For per-agent webhook secrets (Phase 12.1 messaging primitive), use
+    `cueapi agents webhook-secret get/regenerate` instead.
+    """
+    pass
+
+
+@key_webhook_secret.command(name="get")
+@click.pass_context
+def key_webhook_secret_get(ctx: click.Context) -> None:
+    """Reveal the current user-level webhook signing secret."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.get("/auth/webhook-secret")
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_info("Webhook secret:", data.get("webhook_secret", "?"))
+                click.echo()
+            elif resp.status_code == 404:
+                echo_error(
+                    "No webhook secret found. The user-level webhook secret is "
+                    "auto-provisioned for accounts using the legacy webhook signing "
+                    "path; if you only use the messaging primitive (per-agent secrets), "
+                    "this is expected. Use `cueapi agents webhook-secret get <ref>` "
+                    "for an agent's secret instead."
+                )
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@key_webhook_secret.command(name="regenerate")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.pass_context
+def key_webhook_secret_regenerate(ctx: click.Context, yes: bool) -> None:
+    """Rotate the user-level webhook signing secret. Old secret is revoked immediately.
+
+    Server requires the X-Confirm-Destructive: true header (same pattern as
+    api-key regenerate). The CLI sends this header automatically when the user
+    confirms the prompt (or passes --yes).
+    """
+    if not yes:
+        if not click.confirm(
+            "Rotate user-level webhook secret? Current secret will be revoked immediately."
+        ):
+            click.echo("Aborted.")
+            return
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.post(
+                "/auth/webhook-secret/regenerate",
+                json={},
+                headers={"X-Confirm-Destructive": "true"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                click.echo()
+                echo_success("Rotated user-level webhook secret")
+                echo_info("New webhook secret (save now — only shown once):", data.get("webhook_secret", "?"))
+                click.echo()
+            elif resp.status_code == 400:
+                # Should be unreachable since the CLI sends the confirmation
+                # header automatically; but if the server's contract changes,
+                # surface the error rather than swallow it.
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", "Bad request"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
 main.add_command(key)
 
 
@@ -1259,6 +1338,88 @@ def agents_sent(
 
 
 main.add_command(agents)
+
+
+# --- Workers (fleet visibility for worker-transport users) ---
+
+
+@main.group()
+def workers() -> None:
+    """Manage worker fleet (registered workers + heartbeat status)."""
+    pass
+
+
+@workers.command(name="list")
+@click.pass_context
+def workers_list(ctx: click.Context) -> None:
+    """List all registered workers with heartbeat status."""
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.get("/workers")
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            workers_list_data = data.get("workers", [])
+            if not workers_list_data:
+                click.echo(
+                    "\nNo workers registered yet. Workers register automatically by "
+                    "sending heartbeats; install cueapi-worker to get started.\n"
+                )
+                return
+            click.echo()
+            rows = []
+            for w in workers_list_data:
+                rows.append([
+                    w.get("worker_id", "?"),
+                    format_status(w.get("heartbeat_status", "?")),
+                    str(w.get("seconds_since_heartbeat", "?")),
+                    (w.get("last_heartbeat") or "—")[:19].replace("T", " "),
+                ])
+            echo_table(
+                ["WORKER ID", "STATUS", "SECONDS AGO", "LAST HEARTBEAT"],
+                rows,
+                widths=[28, 14, 14, 22],
+            )
+            total = data.get("total", len(workers_list_data))
+            click.echo(f"\n{total} workers\n")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@workers.command(name="delete")
+@click.argument("worker_id")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation")
+@click.pass_context
+def workers_delete(ctx: click.Context, worker_id: str, yes: bool) -> None:
+    """Delete a registered worker.
+
+    Removes the worker row; in-flight executions claimed by this worker
+    will be picked up by the stale-recovery loop. Useful for cleaning up
+    workers that have been decommissioned.
+    """
+    if not yes:
+        if not click.confirm(f"Delete worker {worker_id}?"):
+            click.echo("Aborted.")
+            return
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.delete(f"/workers/{worker_id}")
+            if resp.status_code == 204:
+                echo_success(f"Deleted worker: {worker_id}")
+            elif resp.status_code == 404:
+                echo_error(f"Worker not found: {worker_id}")
+            else:
+                try:
+                    error = resp.json().get("detail", {}).get("error", {})
+                    echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+                except Exception:
+                    echo_error(f"Failed (HTTP {resp.status_code})")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+main.add_command(workers)
 
 
 if __name__ == "__main__":

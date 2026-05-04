@@ -738,3 +738,190 @@ def test_top_level_help_lists_agents():
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "agents" in result.output
+
+
+# --- workers + key webhook-secret ---
+#
+# Reuses _FakeResp from the agents tests above. _WSClient is a separate
+# capture client because it tracks the headers kwarg (needed for the
+# X-Confirm-Destructive pin on key webhook-secret regenerate).
+
+
+class _WSClient:
+    def __init__(self, responses: Optional[dict] = None):
+        self.calls: list = []
+        self._responses = responses or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def _resolve(self, method: str, path: str):
+        for (m, p), factory in sorted(self._responses.items(), key=lambda kv: -len(kv[0][1])):
+            if m == method and path.startswith(p):
+                return factory()
+        return _FakeResp(200, {})
+
+    def get(self, path, params=None, **_):
+        self.calls.append(("GET", path, params, None))
+        return self._resolve("GET", path)
+
+    def post(self, path, json=None, headers=None, **_):
+        self.calls.append(("POST", path, json, headers))
+        return self._resolve("POST", path)
+
+    def delete(self, path, **_):
+        self.calls.append(("DELETE", path, None, None))
+        return self._resolve("DELETE", path)
+
+
+def _patch_ws_client(monkeypatch, holder, responses=None):
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        holder["client"] = _WSClient(responses=responses)
+        return holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_workers_group_help():
+    result = runner.invoke(main, ["workers", "--help"])
+    assert result.exit_code == 0
+    for sub in ("list", "delete"):
+        assert sub in result.output
+
+
+def test_workers_list_renders(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/workers"): lambda: _FakeResp(
+                200,
+                {
+                    "workers": [
+                        {
+                            "worker_id": "worker-1",
+                            "heartbeat_status": "online",
+                            "seconds_since_heartbeat": 5,
+                            "last_heartbeat": "2026-05-04T17:30:00Z",
+                        }
+                    ],
+                    "total": 1,
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["workers", "list"])
+    assert result.exit_code == 0, result.output
+    assert "worker-1" in result.output
+    assert "online" in result.output
+
+
+def test_workers_list_empty_renders_install_hint(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/workers"): lambda: _FakeResp(200, {"workers": [], "total": 0})
+        },
+    )
+    result = runner.invoke(main, ["workers", "list"])
+    assert result.exit_code == 0
+    assert "no workers" in result.output.lower() or "register" in result.output.lower()
+
+
+def test_workers_delete_with_yes(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("DELETE", "/workers/worker-1"): lambda: _FakeResp(204, {})
+        },
+    )
+    result = runner.invoke(main, ["workers", "delete", "worker-1", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert holder["client"].calls[-1][:2] == ("DELETE", "/workers/worker-1")
+
+
+def test_workers_delete_without_yes_aborts():
+    result = runner.invoke(main, ["workers", "delete", "worker-1"], input="n\n")
+    assert "Aborted" in result.output or "aborted" in result.output.lower()
+
+
+def test_key_webhook_secret_get_help():
+    result = runner.invoke(main, ["key", "webhook-secret", "get", "--help"])
+    assert result.exit_code == 0
+
+
+def test_key_webhook_secret_regenerate_help():
+    result = runner.invoke(main, ["key", "webhook-secret", "regenerate", "--help"])
+    assert result.exit_code == 0
+    assert "--yes" in result.output or "-y" in result.output
+
+
+def test_key_webhook_secret_get_renders(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/auth/webhook-secret"): lambda: _FakeResp(
+                200, {"webhook_secret": "wsec_user_revealed"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["key", "webhook-secret", "get"])
+    assert result.exit_code == 0
+    assert "wsec_user_revealed" in result.output
+
+
+def test_key_webhook_secret_get_404_helpful_error(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/auth/webhook-secret"): lambda: _FakeResp(404, {})
+        },
+    )
+    result = runner.invoke(main, ["key", "webhook-secret", "get"])
+    assert "agents webhook-secret" in result.output
+
+
+def test_key_webhook_secret_regenerate_sends_destructive_header(monkeypatch):
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/auth/webhook-secret/regenerate"): lambda: _FakeResp(
+                200, {"webhook_secret": "wsec_new"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["key", "webhook-secret", "regenerate", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    method, path, body, headers = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/auth/webhook-secret/regenerate"
+    assert headers == {"X-Confirm-Destructive": "true"}
+    assert "wsec_new" in result.output
+
+
+def test_key_webhook_secret_regenerate_aborts_without_yes():
+    result = runner.invoke(
+        main,
+        ["key", "webhook-secret", "regenerate"],
+        input="n\n",
+    )
+    assert "Aborted" in result.output or "aborted" in result.output.lower()
