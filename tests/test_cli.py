@@ -1142,3 +1142,270 @@ def test_update_catch_up_validated_by_click():
         or "invalid" in result.output.lower()
         or "run_once_if_missed" in result.output
     )
+
+
+# --- payload_override enforcement flags (hosted PR #590) ---
+
+
+def test_create_require_payload_override_in_help():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    assert "--require-payload-override" in result.output
+    assert "--no-require-payload-override" in result.output
+
+
+def test_create_required_keys_in_help():
+    result = runner.invoke(main, ["create", "--help"])
+    assert result.exit_code == 0
+    assert "--required-keys" in result.output
+
+
+def test_update_require_payload_override_in_help():
+    result = runner.invoke(main, ["update", "--help"])
+    assert result.exit_code == 0
+    assert "--require-payload-override" in result.output
+    assert "--no-require-payload-override" in result.output
+
+
+def test_update_required_keys_in_help():
+    result = runner.invoke(main, ["update", "--help"])
+    assert result.exit_code == 0
+    assert "--required-keys" in result.output
+
+
+# --- body-construction unit tests for new flags ---
+#
+# These mock the HTTP layer (CueAPIClient.post / .patch) and assert that the
+# CLI body matches the hosted-API spec. Cheap insurance against flag-wiring
+# regressions when refactoring create/update body builders.
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self):
+        self.posted: list = []
+        self.patched: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def post(self, path, json=None, **_):
+        self.posted.append((path, json))
+        return _FakeResp(201, {"id": "cue_test", "status": "active", "next_run": None})
+
+    def patch(self, path, json=None, **_):
+        self.patched.append((path, json))
+        return _FakeResp(200, {"id": "cue_test", "name": json.get("name", "x") if json else "x"})
+
+    def get(self, *_, **__):
+        # Not used by these tests but defined so the context-manager surface
+        # matches CueAPIClient.
+        return _FakeResp(200, {})
+
+
+def _patched_client(monkeypatch, client_holder):
+    """Patch CueAPIClient in cueapi.cli to return a captured FakeClient."""
+    import cueapi.cli as cli_mod
+
+    def fake_factory(*_, **__):
+        client_holder["client"] = _FakeClient()
+        return client_holder["client"]
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_create_require_payload_override_true_sends_field(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "create",
+            "--name", "team-comm",
+            "--cron", "0 9 * * *",
+            "--worker",
+            "--require-payload-override",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert body.get("require_payload_override") is True
+
+
+def test_create_no_require_payload_override_sends_false(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "create",
+            "--name", "cron-cue",
+            "--cron", "0 9 * * *",
+            "--worker",
+            "--no-require-payload-override",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert body.get("require_payload_override") is False
+
+
+def test_create_omits_require_payload_override_when_unset(monkeypatch):
+    # Default None must NOT appear in the body — server-side default is the
+    # source of truth for "did the caller specify this?" Pinning this
+    # behavior so a refactor can't silently start sending false.
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["create", "--name", "x", "--cron", "0 9 * * *", "--worker"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert "require_payload_override" not in body
+
+
+def test_create_required_keys_splits_and_trims(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "create",
+            "--name", "team-comm",
+            "--cron", "0 9 * * *",
+            "--worker",
+            "--required-keys", " task ,message,  token",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert body.get("required_payload_keys") == ["task", "message", "token"]
+
+
+def test_create_required_keys_empty_string_sends_empty_list(monkeypatch):
+    # Empty string is the "explicit clear" path. Pin so a future refactor
+    # doesn't drop the body field entirely (which would mean "leave
+    # unchanged" not "clear").
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "create",
+            "--name", "x",
+            "--cron", "0 9 * * *",
+            "--worker",
+            "--required-keys", "",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].posted[-1][1]
+    assert body.get("required_payload_keys") == []
+
+
+def test_update_require_payload_override_tri_state(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["update", "cue_test", "--require-payload-override"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert body.get("require_payload_override") is True
+
+
+def test_update_no_require_payload_override_sends_false(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["update", "cue_test", "--no-require-payload-override"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert body.get("require_payload_override") is False
+
+
+def test_update_required_keys_works(monkeypatch):
+    holder: dict = {}
+    _patched_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["update", "cue_test", "--required-keys", "a,b"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].patched[-1][1]
+    assert body.get("required_payload_keys") == ["a", "b"]
+
+
+# --- effective payload display on `executions get` (hosted PR #589) ---
+
+
+def test_executions_get_displays_payload_when_present(monkeypatch):
+    import cueapi.cli as cli_mod
+
+    fake_response = {
+        "id": "exec_abc",
+        "cue_id": "cue_xyz",
+        "status": "success",
+        "scheduled_for": "2026-05-04T10:00:00Z",
+        "attempts": 1,
+        "payload": {"task": "demo", "message": "hello"},
+    }
+
+    class _GetClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get(self, path, **_):
+            return _FakeResp(200, fake_response)
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", lambda *_, **__: _GetClient())
+    result = runner.invoke(main, ["executions", "get", "exec_abc"])
+    assert result.exit_code == 0, result.output
+    assert "Payload:" in result.output
+    # Pretty-print with indent=2, sort_keys=True — pin the keys are visible.
+    assert "task" in result.output
+    assert "demo" in result.output
+
+
+def test_executions_get_omits_payload_when_null(monkeypatch):
+    import cueapi.cli as cli_mod
+
+    fake_response = {
+        "id": "exec_abc",
+        "cue_id": "cue_xyz",
+        "status": "pending",
+        "payload": None,
+    }
+
+    class _GetClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def get(self, path, **_):
+            return _FakeResp(200, fake_response)
+
+    monkeypatch.setattr(cli_mod, "CueAPIClient", lambda *_, **__: _GetClient())
+    result = runner.invoke(main, ["executions", "get", "exec_abc"])
+    assert result.exit_code == 0, result.output
+    assert "Payload:" not in result.output

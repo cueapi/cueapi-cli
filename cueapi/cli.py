@@ -109,6 +109,27 @@ def quickstart(ctx: click.Context) -> None:
         "Strictly 1:1 chaining; the target cue is validated at create time."
     ),
 )
+@click.option(
+    "--require-payload-override/--no-require-payload-override",
+    "require_payload_override",
+    default=None,
+    help=(
+        "Require payload_override on every fire (server-side enforcement, hosted PR #590). "
+        "Use on team-comm cues where the payload IS the message; leave unset for cron-style "
+        "cues that rely on the stored cue.payload. Fires without payload_override are rejected "
+        "with HTTP 400 payload_override_required."
+    ),
+)
+@click.option(
+    "--required-keys",
+    "required_keys",
+    default=None,
+    help=(
+        "Comma-separated keys that must be present in the resolved override on fire (post-merge). "
+        "Missing keys yield HTTP 400 missing_required_payload_keys. Implies --require-payload-override "
+        "in spirit but doesn't set it; pass both for full enforcement. Empty string sends an empty list."
+    ),
+)
 @click.pass_context
 def create(
     ctx: click.Context,
@@ -127,6 +148,8 @@ def create(
     catch_up: Optional[str],
     verification: Optional[str],
     on_success_fire: Optional[str],
+    require_payload_override: Optional[bool],
+    required_keys: Optional[str],
 ) -> None:
     """Create a new cue."""
     if cron and at_time:
@@ -192,6 +215,18 @@ def create(
 
     if on_success_fire:
         body["on_success_fire"] = on_success_fire
+
+    # Hosted PR #590: per-cue opt-in enforcement of payload_override on /fire.
+    # `require_payload_override=None` means "not specified" — omit from body so
+    # the server's default (false) applies on create.
+    if require_payload_override is not None:
+        body["require_payload_override"] = require_payload_override
+
+    # `required_keys=None` → omit. Empty string → send `[]` (explicit clear).
+    # Non-empty string → split, trim, drop empties.
+    if required_keys is not None:
+        parsed_keys = [k.strip() for k in required_keys.split(",") if k.strip()]
+        body["required_payload_keys"] = parsed_keys
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
@@ -491,6 +526,25 @@ def fire(ctx: click.Context, cue_id: str, payload_override: Optional[str], merge
     default=False,
     help="Clear on_success_fire (disable chaining). Mutually exclusive with --on-success-fire.",
 )
+@click.option(
+    "--require-payload-override/--no-require-payload-override",
+    "require_payload_override",
+    default=None,
+    help=(
+        "Toggle server-side enforcement of payload_override on fire (hosted PR #590). "
+        "--require-payload-override turns it on; --no-require-payload-override turns it off. "
+        "Omit to leave unchanged."
+    ),
+)
+@click.option(
+    "--required-keys",
+    "required_keys",
+    default=None,
+    help=(
+        "Comma-separated keys that must be present in the resolved override on fire. "
+        "Empty string sends `[]` (explicit clear). Omit to leave unchanged."
+    ),
+)
 @click.pass_context
 def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[str],
            url: Optional[str], payload: Optional[str], description: Optional[str],
@@ -501,7 +555,9 @@ def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[
            catch_up: Optional[str],
            verification: Optional[str],
            on_success_fire: Optional[str],
-           clear_on_success_fire: bool) -> None:
+           clear_on_success_fire: bool,
+           require_payload_override: Optional[bool],
+           required_keys: Optional[str]) -> None:
     """Update an existing cue."""
     if on_success_fire and clear_on_success_fire:
         raise click.UsageError("--on-success-fire and --clear-on-success-fire are mutually exclusive.")
@@ -549,6 +605,15 @@ def update(ctx: click.Context, cue_id: str, name: Optional[str], cron: Optional[
         # Server uses None to disable chaining; sentinel pattern. Send literal
         # null in JSON.
         body["on_success_fire"] = None
+
+    # Hosted PR #590: tri-state on update — None omits, True/False sends.
+    if require_payload_override is not None:
+        body["require_payload_override"] = require_payload_override
+
+    # required_keys: None omits; empty string sends []; non-empty splits.
+    if required_keys is not None:
+        parsed_keys = [k.strip() for k in required_keys.split(",") if k.strip()]
+        body["required_payload_keys"] = parsed_keys
 
     if not body:
         raise click.UsageError("Must specify at least one field to update.")
@@ -791,6 +856,13 @@ def executions_get(ctx: click.Context, execution_id: str) -> None:
                 echo_info("HTTP status:", str(ex["http_status"]))
             if ex.get("error_message"):
                 echo_info("Error:", ex["error_message"])
+            # Effective payload (hosted PR #589): the JSON the handler /
+            # webhook actually saw at delivery time. Falls back to the
+            # parent cue's stored payload when no per-fire override was
+            # set. Surfaced for forensics — what was delivered, not what
+            # the cue's stored default looks like at query time.
+            if ex.get("payload") is not None:
+                echo_info("Payload:", json.dumps(ex["payload"], indent=2, sort_keys=True))
             click.echo()
     except click.ClickException as e:
         click.echo(str(e))
