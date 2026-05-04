@@ -7,7 +7,7 @@
     "cli/cueapi/cli.py (private mirror)"
   ],
   "last_full_audit": "2026-05-04",
-  "cli_version_at_audit": "0.1.x",
+  "cli_version_at_audit": "0.2.x",
   "audit_methodology": "Walk every endpoint in private cueapi/app/routers/ and map to a CLI command in cueapi-cli/cueapi/cli.py. Per-command, walk the corresponding private schemas/*.py to verify field-level coverage in the command's --flag set. Drift goes in `endpoints_missing` or `command_drift` keyed by command.",
   "audit_cadence": "Monthly full sweep. Per-PR diffs handled via the .github/pull_request_template.md `Parity Impact` section in the private repo.",
 
@@ -16,38 +16,49 @@
     "cueapi whoami": "GET /v1/auth/me",
     "cueapi logout": "local credentials only — no API call",
     "cueapi quickstart": "wraps multiple endpoints for first-time setup",
-    "cueapi create": "POST /v1/cues",
+    "cueapi create": "POST /v1/cues (covers entire CueCreate schema as of 0.2.x)",
     "cueapi list": "GET /v1/cues",
     "cueapi get <id>": "GET /v1/cues/{id}",
     "cueapi pause <id>": "PATCH /v1/cues/{id} (status=paused)",
     "cueapi resume <id>": "PATCH /v1/cues/{id} (status=active)",
     "cueapi delete <id>": "DELETE /v1/cues/{id}",
-    "cueapi fire <id>": "POST /v1/cues/{id}/fire (with --payload-override + --merge-strategy)",
-    "cueapi update <id>": "PATCH /v1/cues/{id}",
+    "cueapi fire <id>": "POST /v1/cues/{id}/fire (with --payload-override + --merge-strategy + --send-at, PR #618 pending)",
+    "cueapi update <id>": "PATCH /v1/cues/{id} (covers entire CueUpdate schema as of 0.2.x)",
     "cueapi upgrade": "POST /v1/billing/checkout",
     "cueapi manage": "POST /v1/billing/portal",
     "cueapi usage": "GET /v1/usage",
-    "cueapi executions list": "GET /v1/executions",
+    "cueapi executions list": "GET /v1/executions (with --outcome-state / --result-type / --has-evidence / --triggered-by per #27)",
     "cueapi executions list-claimable": "GET /v1/executions/claimable",
-    "cueapi executions get <id>": "GET /v1/executions/{id}",
+    "cueapi executions get <id>": "GET /v1/executions/{id} (renders `payload` field per PR #589)",
     "cueapi executions claim <id>": "POST /v1/executions/{id}/claim",
     "cueapi executions claim-next": "POST /v1/executions/claim",
     "cueapi executions heartbeat <id>": "POST /v1/executions/{id}/heartbeat",
     "cueapi executions report-outcome <id>": "POST /v1/executions/{id}/outcome",
-    "cueapi key regenerate": "POST /v1/auth/key/regenerate"
+    "cueapi executions replay <id>": "POST /v1/executions/{id}/replay (PR #31)",
+    "cueapi executions verification-pending <id>": "POST /v1/executions/{id}/verification-pending (PR #31)",
+    "cueapi executions verify <id>": "POST /v1/executions/{id}/verify with --valid/--invalid + --reason (PR #31)",
+    "cueapi key regenerate": "POST /v1/auth/key/regenerate",
+    "cueapi key webhook-secret get": "GET /v1/auth/webhook-secret (PR #33)",
+    "cueapi key webhook-secret regenerate": "POST /v1/auth/webhook-secret/regenerate (PR #33; sends X-Confirm-Destructive automatically)",
+    "cueapi workers list": "GET /v1/workers (PR #33)",
+    "cueapi workers delete <id>": "DELETE /v1/workers/{id} (PR #33; not in original manifest, added bonus)",
+    "cueapi agents create": "POST /v1/agents (PR #28; messaging primitive identity)",
+    "cueapi agents list": "GET /v1/agents (PR #28)",
+    "cueapi agents get <ref>": "GET /v1/agents/{ref} (PR #28)",
+    "cueapi agents update <ref>": "PATCH /v1/agents/{ref} with --clear-webhook-url sentinel (PR #28)",
+    "cueapi agents delete <ref>": "DELETE /v1/agents/{ref} (PR #28; soft delete)",
+    "cueapi agents webhook-secret get <ref>": "GET /v1/agents/{ref}/webhook-secret (PR #28)",
+    "cueapi agents webhook-secret regenerate <ref>": "POST /v1/agents/{ref}/webhook-secret/regenerate (PR #28; sends X-Confirm-Destructive automatically)",
+    "cueapi agents inbox <ref>": "GET /v1/agents/{ref}/inbox (PR #28; poll endpoint)",
+    "cueapi agents sent <ref>": "GET /v1/agents/{ref}/sent (PR #28)",
+    "cueapi messages send": "POST /v1/messages (PR #29; --from in X-Cueapi-From-Agent header, --idempotency-key in Idempotency-Key header)",
+    "cueapi messages get <id>": "GET /v1/messages/{id} (PR #29)",
+    "cueapi messages read <id>": "POST /v1/messages/{id}/read (PR #29; idempotent)",
+    "cueapi messages ack <id>": "POST /v1/messages/{id}/ack (PR #29; terminal)"
   },
 
   "endpoints_missing": {
-    "POST /v1/executions/{id}/replay": {"blocker": "Replay flow exists server-side; no CLI surface."},
-    "POST /v1/executions/{id}/verification-pending": {"blocker": "Verification helper for handlers that produce evidence asynchronously."},
-    "POST /v1/executions/{id}/verify": {"blocker": "Manual verification flow; no CLI surface."},
-    "POST /v1/worker/heartbeat": {"blocker": "Worker registration; CLI users can register workers via cueapi-worker but not via this CLI directly."},
-    "GET /v1/workers": {"blocker": "Fleet visibility — list workers + heartbeat status. Useful for ops."},
-    "GET /v1/auth/webhook-secret": {"blocker": "Webhook-secret retrieval for users running their own webhook servers."},
-    "POST /v1/auth/webhook-secret/regenerate": {"blocker": "Destructive — re-evaluate."},
-    "Messaging primitive (all of /v1/agents, /v1/messages, /v1/agents/{id}/inbox)": {
-      "blocker": "Phase 12.1.5 messaging primitive on prod but no CLI surface. Would need new command group: `cueapi agents` + `cueapi messages`. Significant new surface."
-    }
+    "POST /v1/worker/heartbeat": {"blocker": "Worker registration; manifest entry retained but deliberately skipped in the CLI port wave — the cueapi-worker package wraps this endpoint with proper heartbeat-loop semantics. Direct SDK-driven registration is redundant. Documented in `cueapi workers` group docstring."}
   },
 
   "command_drift": {
@@ -55,51 +66,59 @@
       "covered_flags": [
         "--name", "--cron", "--at", "--url / --callback", "--method",
         "--timezone", "--payload", "--description", "--worker",
-        "--on-failure"
+        "--on-failure",
+        "--delivery", "--alerts", "--catch-up", "--verification",
+        "--on-success-fire",
+        "--require-payload-override / --no-require-payload-override",
+        "--required-keys"
       ],
       "missing_flags": [
-        "--require-payload-override (PR #590, enforces payload_override on /fire)",
-        "--required-keys (PR #590, comma-separated list)",
-        "--transport (currently inferred from --worker; explicit flag would be cleaner)",
-        "--delivery (delivery config JSON)",
-        "--alerts (alert config JSON)",
-        "--catch-up (run_once_if_missed / skip_missed / replay_all)",
-        "--verification (verification config JSON)",
-        "--on-success-fire (cue ID for native chaining, Gap 1)"
+        "--transport (currently inferred from --worker; explicit flag would be cleaner — refactor scope, not a simple flag-add)"
       ]
     },
     "cueapi update": {
       "covered_flags": [
         "--name", "--cron", "--at", "--url / --callback", "--method",
-        "--timezone", "--payload", "--description"
-      ],
-      "missing_flags": [
+        "--timezone", "--payload", "--description", "--on-failure",
+        "--status",
+        "--delivery", "--alerts", "--catch-up", "--verification",
+        "--on-success-fire", "--clear-on-success-fire",
         "--require-payload-override / --no-require-payload-override",
-        "--required-keys",
-        "--on-failure", "--delivery", "--alerts", "--catch-up",
-        "--verification", "--on-success-fire / --clear-on-success-fire",
-        "--status (active / paused; alternative to pause/resume commands)"
-      ]
+        "--required-keys"
+      ],
+      "missing_flags": []
+    },
+    "cueapi fire": {
+      "covered_flags": [
+        "--payload-override", "--merge-strategy",
+        "--send-at (PR #37 / hosted #618 — pending merge as of 2026-05-04)"
+      ],
+      "missing_flags": []
     },
     "cueapi executions get": {
-      "current_display": "execution metadata + outcome + evidence fields",
-      "missing_display": "payload field (PR #589, just shipped) — should display the effective payload (payload_override OR cue.payload) so users can see what the handler actually saw"
+      "current_display": "execution metadata + outcome + evidence fields + effective payload (PR #589 ported via #26)",
+      "missing_display": null
     },
     "cueapi executions list": {
-      "covered_flags": ["--cue-id", "--status", "--limit", "--offset"],
-      "missing_flags": [
-        "--outcome-state (filter by reported_success / verified_success / verification_pending / etc.)",
-        "--result-type (filter by evidence result_type)",
-        "--has-evidence (filter to executions with evidence_external_id)",
-        "--triggered-by (filter manual_fire / scheduled / chain)"
-      ]
+      "covered_flags": [
+        "--cue-id", "--status", "--limit", "--offset",
+        "--outcome-state", "--result-type", "--has-evidence", "--triggered-by"
+      ],
+      "missing_flags": []
     }
   },
 
   "ported_pr_history": [
-    "PR #589 (expose payload on GET /v1/executions): NOT YET PORTED — Backlog row 'Parity port: PR #590 → cueapi-cli' priority=now (the row covers both #589 + #590 since they touch the same surface). CLI needs to display the new payload field on `executions get` output.",
-    "PR #590 (require_payload_override): NOT YET PORTED — Backlog row priority=now. Adds --require-payload-override + --required-keys to create + update."
+    "PR #589 (expose payload on GET /v1/executions) → ported via cueapi-cli #26 (merged 2026-05-04T19:11:49Z). `cueapi executions get` pretty-prints the new `payload` field when present.",
+    "PR #590 (require_payload_override + required_payload_keys) → ported via cueapi-cli #26 (merged 2026-05-04T19:11:49Z). Adds --require-payload-override / --no-require-payload-override + --required-keys to `create` and `update`.",
+    "executions-list filter parity (server already supported, CLI catch-up) → ported via cueapi-cli #27 (merged 2026-05-04T19:14:41Z). Adds --outcome-state / --result-type / --has-evidence / --triggered-by.",
+    "Messaging primitive — agents identity surface (Phase 12.1.5) → ported via cueapi-cli #28 (merged 2026-05-04T18:08:58Z). 9 commands: create / list / get / update / delete / webhook-secret get & regenerate / inbox / sent.",
+    "Messaging primitive — message lifecycle (Phase 12.1.5) → ported via cueapi-cli #29 (merged 2026-05-04T19:24:04Z). 4 commands: send / get / read / ack. --from in X-Cueapi-From-Agent header, --idempotency-key support.",
+    "Remaining create + update flags (delivery / alerts / catch-up / verification / on-success-fire / status) → ported via cueapi-cli #30 (merged 2026-05-04T19:08:08Z). Click Choice validation on --catch-up + --status.",
+    "Executions verification surface (replay / verify / verification-pending) → ported via cueapi-cli #31 (merged 2026-05-04T19:23:30Z). verify is tri-state; --reason capped at 500 chars client-side.",
+    "Workers fleet + user-level webhook-secret → ported via cueapi-cli #33 (merged 2026-05-04T19:00:11Z). New `cueapi workers` top-level group + nested `cueapi key webhook-secret`. X-Confirm-Destructive sent automatically on regenerate paths.",
+    "PR #618 (per-fire send_at scheduling) → port in flight on cueapi-cli #37 (opened 2026-05-04). Adds --send-at to `cueapi fire`."
   ],
 
-  "notes": "First seeded 2026-05-04 as Layer 2 of parity discipline (PR template in cueapi/cueapi#615 + this manifest + Backlog rows). Schema mirrors cueapi-python's manifest. The `endpoints_missing` and `command_drift` sections are deliberately verbose — they are the audit checklist for catching up the CLI to the hosted API."
+  "notes": "Updated 2026-05-04 to reflect the 8-PR parity wave (cueapi-cli #26 / #27 / #28 / #29 / #30 / #31 / #33 + #37 in flight). The CLI is now feature-complete against the manifest's `endpoints_missing` (only the deliberately-skipped POST /v1/worker/heartbeat remains, with the tracked rationale that cueapi-worker is the canonical wrapper for that endpoint). Only `--transport` flag on `cueapi create` is still flagged in `command_drift` — that's a refactor concern (decouple from --worker) rather than a simple flag addition. Schema mirrors cueapi-python's manifest. The `endpoints_missing` and `command_drift` sections are the audit checklist."
 }
