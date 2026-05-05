@@ -2160,3 +2160,234 @@ def test_top_level_help_lists_messages():
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "messages" in result.output
+
+
+# --- agents --online-only flag + describe alias ---
+
+
+def test_agents_list_help_shows_online_only_flag():
+    result = runner.invoke(main, ["agents", "list", "--help"])
+    assert result.exit_code == 0
+    assert "--online-only" in result.output
+
+
+def test_agents_describe_alias_exists_in_group_help():
+    result = runner.invoke(main, ["agents", "--help"])
+    assert result.exit_code == 0
+    assert "describe" in result.output
+    assert "get" in result.output
+
+
+def test_agents_describe_takes_ref_argument():
+    result = runner.invoke(main, ["agents", "describe", "--help"])
+    assert result.exit_code == 0
+    assert "REF" in result.output or "ref" in result.output.lower()
+
+
+def test_agents_list_online_only_and_status_mutually_exclusive():
+    result = runner.invoke(
+        main,
+        ["agents", "list", "--online-only", "--status", "offline"],
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+class _AgentsOnlineOnlyClient:
+    def __init__(self):
+        self.last_get_path = None
+        self.last_params = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def get(self, path, params=None, **_):
+        self.last_get_path = path
+        self.last_params = params
+        class _R:
+            status_code = 200
+            def json(self):
+                return {"agents": [], "total": 0}
+        return _R()
+
+
+def test_agents_list_online_only_translates_to_status_online(monkeypatch):
+    holder: dict = {}
+    import cueapi.cli as cli_mod
+    def fake_factory(*_, **__):
+        holder["client"] = _AgentsOnlineOnlyClient()
+        return holder["client"]
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+    result = runner.invoke(main, ["agents", "list", "--online-only"])
+    assert result.exit_code == 0, result.output
+    assert holder["client"].last_params.get("status") == "online"
+
+
+# --- cueapi message-to <agent> ---
+
+
+class _MessageToClient:
+    def __init__(self, recipient_exists=True):
+        self.calls = []
+        self.recipient_exists = recipient_exists
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def get(self, path, params=None, **_):
+        self.calls.append(("GET", path, params, None))
+        recipient_exists_local = self.recipient_exists
+        class _R:
+            status_code = 200 if recipient_exists_local else 404
+            def json(self):
+                return {"id": "agt_x", "slug": "alice"} if recipient_exists_local else {}
+            headers = {}
+        return _R()
+
+    def post(self, path, json=None, headers=None, **_):
+        self.calls.append(("POST", path, json, headers))
+        class _R:
+            status_code = 201
+            def json(self):
+                return {"id": "msg_x", "delivery_state": "queued", "thread_id": "thr_x"}
+            headers = {}
+        return _R()
+
+
+def _patch_msg_client(monkeypatch, holder, recipient_exists=True):
+    import cueapi.cli as cli_mod
+    def fake_factory(*_, **__):
+        holder["client"] = _MessageToClient(recipient_exists=recipient_exists)
+        return holder["client"]
+    monkeypatch.setattr(cli_mod, "CueAPIClient", fake_factory)
+
+
+def test_message_to_help_lists_flags():
+    result = runner.invoke(main, ["message-to", "--help"])
+    assert result.exit_code == 0
+    assert "--from" in result.output
+    assert "--subject" in result.output
+    assert "--idempotency-key" in result.output
+    assert "--token" in result.output
+    assert "--skip-resolve" in result.output
+
+
+def test_message_to_top_level_help_includes_command():
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "message-to" in result.output
+
+
+def test_message_to_uses_env_var_for_from(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["message-to", "alice", "hello there"],
+        env={"CUEAPI_MY_AGENT_SLUG": "sender-bot"},
+    )
+    assert result.exit_code == 0, result.output
+    post_calls = [c for c in holder["client"].calls if c[0] == "POST"]
+    assert len(post_calls) == 1
+    _, path, body, headers = post_calls[0]
+    assert path == "/messages"
+    assert body == {"to": "alice", "body": "hello there"}
+    assert headers["X-Cueapi-From-Agent"] == "sender-bot"
+
+
+def test_message_to_resolves_recipient_first(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["message-to", "alice", "hi", "--from", "bob"],
+    )
+    assert result.exit_code == 0
+    assert holder["client"].calls[0][0] == "GET"
+    assert holder["client"].calls[0][1] == "/agents/alice"
+    assert holder["client"].calls[1][0] == "POST"
+
+
+def test_message_to_unknown_recipient_clear_error(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder, recipient_exists=False)
+    result = runner.invoke(
+        main,
+        ["message-to", "ghost", "hi", "--from", "bob"],
+    )
+    assert "Unknown agent" in result.output or "ghost" in result.output
+    assert "agents list" in result.output
+    post_calls = [c for c in holder["client"].calls if c[0] == "POST"]
+    assert len(post_calls) == 0
+
+
+def test_message_to_skip_resolve_skips_pre_flight(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder, recipient_exists=False)
+    result = runner.invoke(
+        main,
+        ["message-to", "ghost", "hi", "--from", "bob", "--skip-resolve"],
+    )
+    assert result.exit_code == 0
+    get_calls = [c for c in holder["client"].calls if c[0] == "GET"]
+    post_calls = [c for c in holder["client"].calls if c[0] == "POST"]
+    assert len(get_calls) == 0
+    assert len(post_calls) == 1
+
+
+def test_message_to_token_auto_fills_subject(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        ["message-to", "alice", "first line of body\nsecond line", "--from", "bob", "--token", "PR-V1"],
+    )
+    assert result.exit_code == 0
+    body = [c for c in holder["client"].calls if c[0] == "POST"][0][2]
+    assert "subject" in body
+    assert "[PR-V1]" in body["subject"]
+    assert "first line" in body["subject"]
+    assert body["metadata"] == {"token": "PR-V1"}
+
+
+def test_message_to_idempotency_key_too_long_rejected_client_side():
+    long_key = "x" * 256
+    result = runner.invoke(
+        main,
+        ["message-to", "alice", "hi", "--from", "bob", "--idempotency-key", long_key],
+    )
+    assert result.exit_code != 0
+    assert "255" in result.output or "characters" in result.output.lower()
+
+
+def test_message_to_priority_validated_by_click():
+    result = runner.invoke(
+        main,
+        ["message-to", "alice", "hi", "--from", "bob", "--priority", "9"],
+    )
+    assert result.exit_code != 0
+
+
+def test_message_to_with_explicit_subject_takes_precedence_over_token(monkeypatch):
+    holder: dict = {}
+    _patch_msg_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "message-to", "alice", "body",
+            "--from", "bob",
+            "--token", "PR-V1",
+            "--subject", "explicit subject wins",
+        ],
+    )
+    assert result.exit_code == 0
+    body = [c for c in holder["client"].calls if c[0] == "POST"][0][2]
+    assert body["subject"] == "explicit subject wins"
+    assert body["metadata"] == {"token": "PR-V1"}

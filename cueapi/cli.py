@@ -1374,6 +1374,13 @@ def agents_create(
 
 @agents.command(name="list")
 @click.option("--status", default=None, type=click.Choice(["online", "offline", "away"]), help="Filter by status")
+@click.option(
+    "--online-only",
+    "online_only",
+    is_flag=True,
+    default=False,
+    help="Shorthand for --status online. Mutually exclusive with --status.",
+)
 @click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
 @click.option("--limit", default=50, type=int, help="Max results (default 50, max 100)")
 @click.option("--offset", default=0, type=int, help="Offset for pagination")
@@ -1381,11 +1388,16 @@ def agents_create(
 def agents_list(
     ctx: click.Context,
     status: Optional[str],
+    online_only: bool,
     include_deleted: bool,
     limit: int,
     offset: int,
 ) -> None:
     """List your agents."""
+    if online_only and status:
+        raise click.UsageError("--online-only and --status are mutually exclusive.")
+    if online_only:
+        status = "online"
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             params: dict = {"limit": limit, "offset": offset}
@@ -1427,7 +1439,11 @@ def agents_list(
 @click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
 @click.pass_context
 def agents_get(ctx: click.Context, ref: str, include_deleted: bool) -> None:
-    """Get an agent by opaque ID or slug-form (agent@user)."""
+    """Get an agent by opaque ID or slug-form (agent@user).
+
+    Aliased as `cueapi agents describe <ref>` per the agent-directory PRD's
+    discovery vocabulary. Both verbs invoke the same Click command.
+    """
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             params: dict = {}
@@ -1701,6 +1717,15 @@ def agents_sent(
             click.echo(f"\n{total} messages\n")
     except click.ClickException as e:
         click.echo(str(e))
+
+
+# Register `cueapi agents describe <ref>` as an alias of `agents get`. Per
+# the agent-directory PRD's verb vocabulary (`describe` reads more naturally
+# in discovery contexts: "describe this agent to me"). Both verbs invoke
+# the same underlying Click command — same callback, same options, same
+# behavior. The shared registration means new options added to `agents_get`
+# automatically apply to `agents describe`.
+agents.add_command(agents_get, name="describe")
 
 
 main.add_command(agents)
@@ -2045,6 +2070,218 @@ def messages_ack(ctx: click.Context, msg_id: str) -> None:
 
 
 main.add_command(messages)
+
+
+# --- Universal `message-to <agent>` shortcut ---
+#
+# Per the agent-directory productization PRD (https://trydock.ai/mike/agent-directory-productization-prd):
+# the canonical inter-agent comm primitive. Hides the messaging-primitive
+# routing details (X-Cueapi-From-Agent header, Idempotency-Key header,
+# /v1/messages POST shape) so callers don't need to remember them.
+#
+# Anti-pattern this replaces: per-agent bash scripts (cma-reply.sh and
+# its siblings) that re-implement the routing protocol. Each per-agent
+# script is a fresh opportunity to mis-encode the same fields the PRD
+# exists to fix. Universal CLI command means one place to look + one
+# migration path when messaging-primitive internals change.
+
+
+@main.command(name="message-to")
+@click.argument("agent_name")
+@click.argument("body", required=False)
+@click.option(
+    "--from",
+    "from_agent",
+    default=None,
+    envvar="CUEAPI_MY_AGENT_SLUG",
+    help=(
+        "Sender agent — opaque agent_id or slug-form (agent@user). Sent as "
+        "the X-Cueapi-From-Agent header. Defaults to $CUEAPI_MY_AGENT_SLUG "
+        "env var. Required either via flag or env."
+    ),
+)
+@click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
+@click.option(
+    "--reply-to",
+    "reply_to",
+    default=None,
+    help="Previous message ID this is replying to (msg_<12 alphanumeric>). thread_id inherits.",
+)
+@click.option(
+    "--priority",
+    default=None,
+    type=click.IntRange(1, 5),
+    help="Priority 1-5 (server default 3).",
+)
+@click.option(
+    "--expects-reply",
+    "expects_reply",
+    is_flag=True,
+    default=False,
+    help="Mark this message as expecting a reply.",
+)
+@click.option(
+    "--idempotency-key",
+    "idempotency_key",
+    default=None,
+    help="Optional Idempotency-Key header (≤255 chars). Same key + same body within 24h returns the existing message with HTTP 200 instead of 201.",
+)
+@click.option(
+    "--token",
+    default=None,
+    help=(
+        "Optional thread token (e.g. MY-TOPIC-V1). Stored in metadata.token "
+        "and surfaced in the subject line if no --subject is given. Useful "
+        "for traceable threads."
+    ),
+)
+@click.option(
+    "--skip-resolve",
+    "skip_resolve",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip the pre-flight `agents get <name>` resolution check. By default "
+        "the CLI verifies the recipient exists before sending so you get a "
+        "clearer error than the server's. Use --skip-resolve to save one "
+        "API call when you're certain the recipient is valid."
+    ),
+)
+@click.pass_context
+def message_to(
+    ctx: click.Context,
+    agent_name: str,
+    body: Optional[str],
+    from_agent: Optional[str],
+    subject: Optional[str],
+    reply_to: Optional[str],
+    priority: Optional[int],
+    expects_reply: bool,
+    idempotency_key: Optional[str],
+    token: Optional[str],
+    skip_resolve: bool,
+) -> None:
+    """Send a message to an agent by name. Universal inter-agent comm shortcut.
+
+    Hides the messaging-primitive routing details (X-Cueapi-From-Agent
+    header, Idempotency-Key, /v1/messages body shape). Resolves AGENT_NAME
+    via `agents get` first (server-side slug-form lookup) so a typo'd name
+    fails fast with a clear error instead of being silently routed to a
+    nonexistent agent.
+
+    Body comes either from the BODY positional argument OR stdin (use `-`
+    or pipe in). The stdin path is useful for multi-line messages or for
+    composing via `$EDITOR | cueapi message-to alice -`.
+
+    Examples:
+
+      \b
+      cueapi message-to alice "ack on the design review"
+      echo "longer message" | cueapi message-to alice -
+      cueapi message-to alice "$(cat draft.md)" --subject "[REVIEW] design"
+      cueapi message-to alice "ack" --token PR-REVIEW-V1 --expects-reply
+    """
+    # Body resolution: positional arg, stdin if "-", or stdin if missing.
+    if body is None:
+        # No positional — read from stdin (allows `cmd | cueapi message-to ...`)
+        body = click.get_text_stream("stdin").read().rstrip("\n")
+    elif body == "-":
+        # Explicit stdin marker.
+        body = click.get_text_stream("stdin").read().rstrip("\n")
+    if not body:
+        raise click.UsageError(
+            "Message body is required. Pass as second positional arg, via stdin, or as `-`."
+        )
+
+    if not from_agent:
+        raise click.UsageError(
+            "--from is required (or set $CUEAPI_MY_AGENT_SLUG env var). "
+            "This is the sender agent slug; the server reads it from the "
+            "X-Cueapi-From-Agent header."
+        )
+
+    if idempotency_key is not None and len(idempotency_key) > 255:
+        raise click.UsageError("--idempotency-key must be ≤255 characters")
+
+    # Subject auto-fill from token if not provided. Standard convention:
+    # `[TOKEN] <first-line-of-body>` (truncated). Token-tagged subjects
+    # are how threads stay traceable across PR/CTO/etc. comms.
+    if not subject and token:
+        first_line = body.splitlines()[0] if body else ""
+        subject = f"[{token}] {first_line[:80]}".strip()
+
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            # Pre-flight resolve unless --skip-resolve. Catches typo'd
+            # recipients before we send and returns a clean error message
+            # naming the unknown agent — matches PRD Success Criterion #3
+            # ("Wrong task name = no longer possible").
+            if not skip_resolve:
+                resolve_resp = client.get(f"/agents/{agent_name}")
+                if resolve_resp.status_code == 404:
+                    echo_error(
+                        f"Unknown agent '{agent_name}'. "
+                        f"Run `cueapi agents list` to see available agents."
+                    )
+                    return
+                if resolve_resp.status_code != 200:
+                    echo_error(f"Failed to resolve agent '{agent_name}' (HTTP {resolve_resp.status_code})")
+                    return
+
+            payload: dict = {"to": agent_name, "body": body}
+            if subject:
+                payload["subject"] = subject
+            if reply_to:
+                payload["reply_to"] = reply_to
+            if priority is not None:
+                payload["priority"] = priority
+            if expects_reply:
+                payload["expects_reply"] = True
+            if token:
+                # Stash token in metadata for downstream traceability.
+                payload["metadata"] = {"token": token}
+
+            headers: dict = {"X-Cueapi-From-Agent": from_agent}
+            if idempotency_key:
+                headers["Idempotency-Key"] = idempotency_key
+
+            resp = client.post("/messages", json=payload, headers=headers)
+            if resp.status_code in (200, 201):
+                m = resp.json()
+                click.echo()
+                if resp.status_code == 200:
+                    echo_info("Idempotency-Key dedup hit:", "existing message returned")
+                echo_success(f"{'Sent' if resp.status_code == 201 else 'Existing'} to {agent_name}: {m.get('id', '?')}")
+                if m.get("thread_id"):
+                    echo_info("Thread:", m["thread_id"])
+                echo_info("Delivery state:", m.get("delivery_state", "?"))
+                # Surface server-side priority-downgrade signal.
+                downgraded = None
+                try:
+                    downgraded = resp.headers.get("X-CueAPI-Priority-Downgraded")
+                except Exception:
+                    pass
+                if downgraded == "true":
+                    echo_info(
+                        "Priority downgraded:",
+                        "true (receiver-pair limit applied; delivered at priority 3)",
+                    )
+                click.echo()
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                code = error.get("code", "conflict")
+                if code == "idempotency_key_conflict":
+                    echo_error(
+                        "Idempotency-Key conflict — same key was already used with a "
+                        "different body. Either reuse the original body or change the key."
+                    )
+                else:
+                    echo_error(error.get("message", f"Conflict (HTTP 409, {code})"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
 
 
 if __name__ == "__main__":
