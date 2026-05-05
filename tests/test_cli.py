@@ -2238,3 +2238,364 @@ def test_fire_combines_send_at_with_payload_override(monkeypatch):
         "merge_strategy": "replace",
         "send_at": "2026-05-04T22:00:00Z",
     }
+# --- agents list --online-only ---
+
+
+def test_agents_list_online_only_sets_status_filter(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={("GET", "/agents"): lambda: _FakeResp(200, {"agents": [], "total": 0})},
+    )
+    result = runner.invoke(main, ["agents", "list", "--online-only"])
+    assert result.exit_code == 0, result.output
+    params = holder["client"].calls[-1][2]
+    assert params["status"] == "online"
+
+
+def test_agents_list_online_only_conflicts_with_status():
+    result = runner.invoke(
+        main, ["agents", "list", "--online-only", "--status", "offline"]
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_agents_list_help_mentions_online_only():
+    result = runner.invoke(main, ["agents", "list", "--help"])
+    assert result.exit_code == 0
+    assert "--online-only" in result.output
+
+
+# --- agents describe (alias) ---
+
+
+def test_agents_describe_renders_same_as_get(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x"): lambda: _FakeResp(
+                200,
+                {
+                    "id": "agt_x",
+                    "slug": "x",
+                    "display_name": "X Agent",
+                    "status": "online",
+                    "webhook_url": None,
+                    "metadata": None,
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["agents", "describe", "agt_x"])
+    assert result.exit_code == 0
+    assert "agt_x" in result.output
+    assert "X Agent" in result.output
+    # Single GET to /agents/<ref>, same as `agents get`.
+    assert holder["client"].calls[-1][0] == "GET"
+    assert holder["client"].calls[-1][1] == "/agents/agt_x"
+
+
+def test_agents_describe_appears_in_help():
+    result = runner.invoke(main, ["agents", "--help"])
+    assert result.exit_code == 0
+    assert "describe" in result.output
+
+
+# --- message-to top-level wrapper ---
+
+
+def test_message_to_passes_agent_id_through_without_lookup(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued", "thread_id": "thr_z"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "message-to",
+            "agt_recipient",
+            "--from",
+            "sender@x",
+            "--body",
+            "hi",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # No GET /agents — agt_ prefix is pass-through.
+    methods = [c[0] for c in holder["client"].calls]
+    assert "GET" not in methods
+    method, path, body, headers = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/messages"
+    assert body["to"] == "agt_recipient"
+    assert body["body"] == "hi"
+    assert headers["X-Cueapi-From-Agent"] == "sender@x"
+
+
+def test_message_to_passes_slug_form_through_without_lookup(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "alice@user1", "--from", "bob@user1", "--body", "hi"],
+    )
+    assert result.exit_code == 0, result.output
+    methods = [c[0] for c in holder["client"].calls]
+    assert "GET" not in methods
+    body = holder["client"].calls[-1][2]
+    assert body["to"] == "alice@user1"
+
+
+def test_message_to_resolves_display_name_case_insensitive(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents"): lambda: _FakeResp(
+                200,
+                {
+                    "agents": [
+                        {"id": "agt_one", "slug": "one", "display_name": "One Agent"},
+                        {"id": "agt_two", "slug": "two", "display_name": "Two Agent"},
+                    ],
+                    "total": 2,
+                },
+            ),
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            ),
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "two agent", "--from", "sender@x", "--body", "hi"],
+    )
+    assert result.exit_code == 0, result.output
+    # 1st call: GET /agents (resolution); 2nd: POST /messages
+    assert holder["client"].calls[0][0] == "GET"
+    assert holder["client"].calls[0][1] == "/agents"
+    post_call = holder["client"].calls[-1]
+    assert post_call[0] == "POST"
+    assert post_call[2]["to"] == "agt_two"
+
+
+def test_message_to_resolves_slug_match(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents"): lambda: _FakeResp(
+                200,
+                {
+                    "agents": [
+                        {"id": "agt_pm", "slug": "pm", "display_name": "Cue PM"},
+                    ],
+                    "total": 1,
+                },
+            ),
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            ),
+        },
+    )
+    result = runner.invoke(
+        main, ["message-to", "pm", "--from", "sender@x", "--body", "hi"]
+    )
+    assert result.exit_code == 0, result.output
+    assert holder["client"].calls[-1][2]["to"] == "agt_pm"
+
+
+def test_message_to_no_match_errors_with_roster_hint(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents"): lambda: _FakeResp(
+                200,
+                {
+                    "agents": [
+                        {"id": "agt_a", "slug": "alpha", "display_name": "Alpha"},
+                    ],
+                    "total": 1,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "nobody", "--from", "sender@x", "--body", "hi"],
+    )
+    # No POST should fire.
+    methods = [c[0] for c in holder["client"].calls]
+    assert "POST" not in methods
+    assert "no agent matches" in result.output.lower()
+    assert "alpha" in result.output.lower()
+
+
+def test_message_to_ambiguous_match_errors(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents"): lambda: _FakeResp(
+                200,
+                {
+                    "agents": [
+                        {"id": "agt_one", "slug": "shared", "display_name": "Worker"},
+                        {"id": "agt_two", "slug": "other", "display_name": "Worker"},
+                    ],
+                    "total": 2,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main, ["message-to", "Worker", "--from", "sender@x", "--body", "hi"]
+    )
+    methods = [c[0] for c in holder["client"].calls]
+    assert "POST" not in methods
+    assert "agt_one" in result.output and "agt_two" in result.output
+
+
+def test_message_to_passes_optionals_through(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "message-to",
+            "agt_recipient",
+            "--from",
+            "sender@x",
+            "--body",
+            "the body",
+            "--subject",
+            "the subject",
+            "--reply-to",
+            "msg_abcdef123456",
+            "--priority",
+            "5",
+            "--expects-reply",
+            "--reply-to-agent",
+            "alt@x",
+            "--metadata",
+            '{"k": "v"}',
+            "--idempotency-key",
+            "idemp-key-1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {
+        "body": "the body",
+        "subject": "the subject",
+        "reply_to": "msg_abcdef123456",
+        "priority": 5,
+        "expects_reply": True,
+        "reply_to_agent": "alt@x",
+        "metadata": {"k": "v"},
+        "to": "agt_recipient",
+    }
+    headers = holder["client"].calls[-1][3]
+    assert headers["X-Cueapi-From-Agent"] == "sender@x"
+    assert headers["Idempotency-Key"] == "idemp-key-1"
+
+
+def test_message_to_omits_expects_reply_when_unset(monkeypatch):
+    # Same default-false discipline as `messages send`.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "expects_reply" not in body
+
+
+def test_message_to_priority_validated_by_click_intrange():
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi", "--priority", "9"],
+    )
+    assert result.exit_code != 0
+
+
+def test_message_to_idempotency_key_too_long_rejected():
+    long_key = "x" * 256
+    result = runner.invoke(
+        main,
+        [
+            "message-to",
+            "agt_x",
+            "--from",
+            "y@z",
+            "--body",
+            "hi",
+            "--idempotency-key",
+            long_key,
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_message_to_invalid_metadata_json():
+    result = runner.invoke(
+        main,
+        [
+            "message-to",
+            "agt_x",
+            "--from",
+            "y@z",
+            "--body",
+            "hi",
+            "--metadata",
+            "{not json",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_top_level_help_lists_message_to():
+    result = runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "message-to" in result.output

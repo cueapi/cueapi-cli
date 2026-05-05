@@ -1392,6 +1392,13 @@ def agents_create(
 
 @agents.command(name="list")
 @click.option("--status", default=None, type=click.Choice(["online", "offline", "away"]), help="Filter by status")
+@click.option(
+    "--online-only",
+    "online_only",
+    is_flag=True,
+    default=False,
+    help="Shortcut for --status online. Mutually exclusive with --status.",
+)
 @click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
 @click.option("--limit", default=50, type=int, help="Max results (default 50, max 100)")
 @click.option("--offset", default=0, type=int, help="Offset for pagination")
@@ -1399,11 +1406,16 @@ def agents_create(
 def agents_list(
     ctx: click.Context,
     status: Optional[str],
+    online_only: bool,
     include_deleted: bool,
     limit: int,
     offset: int,
 ) -> None:
     """List your agents."""
+    if online_only and status:
+        raise click.UsageError("--online-only and --status are mutually exclusive")
+    if online_only:
+        status = "online"
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             params: dict = {"limit": limit, "offset": offset}
@@ -1475,6 +1487,15 @@ def agents_get(ctx: click.Context, ref: str, include_deleted: bool) -> None:
             click.echo()
     except click.ClickException as e:
         click.echo(str(e))
+
+
+@agents.command(name="describe")
+@click.argument("ref")
+@click.option("--include-deleted", is_flag=True, default=False, help="Include soft-deleted agents")
+@click.pass_context
+def agents_describe(ctx: click.Context, ref: str, include_deleted: bool) -> None:
+    """Alias for `agents get`."""
+    ctx.invoke(agents_get, ref=ref, include_deleted=include_deleted)
 
 
 @agents.command(name="update")
@@ -2063,6 +2084,194 @@ def messages_ack(ctx: click.Context, msg_id: str) -> None:
 
 
 main.add_command(messages)
+
+
+def _resolve_recipient(client, recipient: str) -> str:
+    """Resolve a recipient string to an agent_id or slug-form.
+
+    Pass-through when `recipient` already looks like an agent_id (`agt_*`)
+    or slug-form (`slug@user`). Otherwise list `/agents` and match
+    `display_name` or `slug` case-insensitive exact.
+    """
+    if recipient.startswith("agt_") or "@" in recipient:
+        return recipient
+
+    candidates: list = []
+    offset = 0
+    while True:
+        resp = client.get("/agents", params={"limit": 100, "offset": offset})
+        if resp.status_code != 200:
+            raise click.ClickException(
+                f"Failed to list agents (HTTP {resp.status_code})"
+            )
+        page = resp.json().get("agents", [])
+        candidates.extend(page)
+        if len(page) < 100 or offset >= 200:
+            break
+        offset += 100
+
+    needle = recipient.lower()
+    matches = [
+        a
+        for a in candidates
+        if (a.get("display_name") or "").lower() == needle
+        or (a.get("slug") or "").lower() == needle
+    ]
+    if not matches:
+        known = sorted({
+            a.get("display_name") or a.get("slug") or a.get("id", "?")
+            for a in candidates
+        })
+        hint = ", ".join(known) if known else "(no agents in roster)"
+        raise click.ClickException(
+            f"No agent matches '{recipient}'. Roster: {hint}"
+        )
+    if len(matches) > 1:
+        ids = ", ".join(m.get("id", "?") for m in matches)
+        raise click.ClickException(
+            f"'{recipient}' matches {len(matches)} agents: {ids}. "
+            "Disambiguate with --to <agent_id> via `messages send`."
+        )
+    return matches[0].get("id", recipient)
+
+
+@main.command(name="message-to")
+@click.argument("recipient")
+@click.option(
+    "--from",
+    "from_agent",
+    required=True,
+    help=(
+        "Sender agent — opaque agent_id or slug-form (agent@user). Sent as "
+        "the X-Cueapi-From-Agent header."
+    ),
+)
+@click.option("--body", "body_text", required=True, help="Message body (1-32768 chars)")
+@click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
+@click.option(
+    "--reply-to",
+    "reply_to",
+    default=None,
+    help="Previous message ID this is replying to (msg_<12 alphanumeric>). thread_id inherits.",
+)
+@click.option(
+    "--priority",
+    default=None,
+    type=click.IntRange(1, 5),
+    help="Priority 1-5 (server default 3). Receiver-pair limits may downgrade priority>3 to 3.",
+)
+@click.option(
+    "--expects-reply",
+    "expects_reply",
+    is_flag=True,
+    default=False,
+    help="Mark this message as expecting a reply.",
+)
+@click.option(
+    "--reply-to-agent",
+    "reply_to_agent",
+    default=None,
+    help="Decoupled reply target (defaults to the sender).",
+)
+@click.option("--metadata", default=None, help="JSON metadata blob")
+@click.option(
+    "--idempotency-key",
+    "idempotency_key",
+    default=None,
+    help=(
+        "Optional Idempotency-Key header (≤255 chars). Same key + same body within "
+        "24h returns the existing message with HTTP 200 instead of 201."
+    ),
+)
+@click.pass_context
+def message_to(
+    ctx: click.Context,
+    recipient: str,
+    from_agent: str,
+    body_text: str,
+    subject: Optional[str],
+    reply_to: Optional[str],
+    priority: Optional[int],
+    expects_reply: bool,
+    reply_to_agent: Optional[str],
+    metadata: Optional[str],
+    idempotency_key: Optional[str],
+) -> None:
+    """Send a message to a recipient by name, slug, or agent ID.
+
+    Resolves <recipient> against your roster:
+      agent_id (agt_*) or slug-form (slug@user) — used as-is.
+      bare name — matched case-insensitive against display_name and slug.
+    """
+    body: dict = {"body": body_text}
+    if subject:
+        body["subject"] = subject
+    if reply_to:
+        body["reply_to"] = reply_to
+    if priority is not None:
+        body["priority"] = priority
+    if expects_reply:
+        body["expects_reply"] = True
+    if reply_to_agent:
+        body["reply_to_agent"] = reply_to_agent
+    if metadata:
+        try:
+            body["metadata"] = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise click.UsageError("--metadata must be valid JSON")
+
+    headers: dict = {"X-Cueapi-From-Agent": from_agent}
+    if idempotency_key:
+        if len(idempotency_key) > 255:
+            raise click.UsageError("--idempotency-key must be ≤255 characters")
+        headers["Idempotency-Key"] = idempotency_key
+
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            try:
+                resolved = _resolve_recipient(client, recipient)
+            except click.ClickException as e:
+                echo_error(str(e))
+                return
+            body["to"] = resolved
+
+            resp = client.post("/messages", json=body, headers=headers)
+            if resp.status_code in (200, 201):
+                m = resp.json()
+                click.echo()
+                if resp.status_code == 200:
+                    echo_info("Idempotency-Key dedup hit:", "existing message returned")
+                echo_success(f"{'Sent' if resp.status_code == 201 else 'Existing'}: {m.get('id', '?')}")
+                echo_info("To:", resolved)
+                if m.get("thread_id"):
+                    echo_info("Thread:", m["thread_id"])
+                echo_info("Delivery state:", m.get("delivery_state", "?"))
+                downgraded_header = None
+                try:
+                    downgraded_header = resp.headers.get("X-CueAPI-Priority-Downgraded")
+                except Exception:
+                    pass
+                if downgraded_header == "true":
+                    echo_info(
+                        "Priority downgraded:",
+                        "true (receiver-pair limit applied; message delivered at priority 3)",
+                    )
+                click.echo()
+            elif resp.status_code == 409:
+                error = resp.json().get("detail", {}).get("error", {})
+                code = error.get("code", "conflict")
+                if code == "idempotency_key_conflict":
+                    echo_error(
+                        "Idempotency-Key conflict — same key was already used with a different body. "
+                        "Either reuse the original body or change the key."
+                    )
+                else:
+                    echo_error(error.get("message", f"Conflict (HTTP 409, {code})"))
+            else:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Failed (HTTP {resp.status_code})"))
+    except click.ClickException as e:
+        click.echo(str(e))
 
 
 if __name__ == "__main__":
