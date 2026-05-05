@@ -2175,6 +2175,21 @@ def _resolve_recipient(client, recipient: str) -> str:
 )
 @click.option("--metadata", default=None, help="JSON metadata blob")
 @click.option(
+    "--mode",
+    "mode",
+    default="auto",
+    type=click.Choice(["live", "bg", "inbox", "webhook", "auto"]),
+    show_default=True,
+    help=(
+        "Delivery mode hint. live = recipient's attached Live session, bg = "
+        "spawn a fresh background session, inbox = leave in inbox for pull, "
+        "webhook = POST to recipient's configured webhook, auto = server "
+        "picks the best supported mode based on recipient capabilities. "
+        "Server may downgrade if the requested mode isn't supported — see "
+        "`Sent via X` in the response."
+    ),
+)
+@click.option(
     "--idempotency-key",
     "idempotency_key",
     default=None,
@@ -2195,6 +2210,7 @@ def message_to(
     expects_reply: bool,
     reply_to_agent: Optional[str],
     metadata: Optional[str],
+    mode: str,
     idempotency_key: Optional[str],
 ) -> None:
     """Send a message to a recipient by name, slug, or agent ID.
@@ -2219,6 +2235,12 @@ def message_to(
             body["metadata"] = json.loads(metadata)
         except json.JSONDecodeError:
             raise click.UsageError("--metadata must be valid JSON")
+    # Default-omit discipline: only send delivery_mode when the user opted
+    # away from `auto`. Server treats absent == auto, so this avoids payload
+    # noise on the common path and keeps wire-format identical to pre-Surface-6
+    # senders. `auto` is also redundant to send.
+    if mode != "auto":
+        body["delivery_mode"] = mode
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:
@@ -2246,6 +2268,20 @@ def message_to(
                 if m.get("thread_id"):
                     echo_info("Thread:", m["thread_id"])
                 echo_info("Delivery state:", m.get("delivery_state", "?"))
+                # Surface the server's chosen delivery mode. The response's
+                # `effective_delivery_mode` is the mode the server actually
+                # used, which may differ from the requested `mode` if the
+                # recipient doesn't support it (e.g. requested live, recipient
+                # has no live session, downgraded to inbox).
+                effective = m.get("effective_delivery_mode")
+                if effective:
+                    if mode != "auto" and effective != mode:
+                        echo_info(
+                            "Sent via:",
+                            f"{effective} (requested {mode}, recipient does not support it)",
+                        )
+                    else:
+                        echo_info("Sent via:", effective)
                 downgraded_header = None
                 try:
                     downgraded_header = resp.headers.get("X-CueAPI-Priority-Downgraded")
