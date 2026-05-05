@@ -7,7 +7,7 @@
     "cli/cueapi/cli.py (private mirror)"
   ],
   "last_full_audit": "2026-05-04",
-  "cli_version_at_audit": "0.2.x",
+  "cli_version_at_audit": "0.3.x",
   "audit_methodology": "Walk every endpoint in private cueapi/app/routers/ and map to a CLI command in cueapi-cli/cueapi/cli.py. Per-command, walk the corresponding private schemas/*.py to verify field-level coverage in the command's --flag set. Drift goes in `endpoints_missing` or `command_drift` keyed by command.",
   "audit_cadence": "Monthly full sweep. Per-PR diffs handled via the .github/pull_request_template.md `Parity Impact` section in the private repo.",
 
@@ -43,8 +43,8 @@
     "cueapi workers list": "GET /v1/workers (PR #33)",
     "cueapi workers delete <id>": "DELETE /v1/workers/{id} (PR #33; not in original manifest, added bonus)",
     "cueapi agents create": "POST /v1/agents (PR #28; messaging primitive identity)",
-    "cueapi agents list": "GET /v1/agents (PR #28)",
-    "cueapi agents get <ref>": "GET /v1/agents/{ref} (PR #28)",
+    "cueapi agents list": "GET /v1/agents (PR #28; --online-only convenience flag added in PR #40)",
+    "cueapi agents get <ref>": "GET /v1/agents/{ref} (PR #28; aliased as `cueapi agents describe <ref>` per PR #40)",
     "cueapi agents update <ref>": "PATCH /v1/agents/{ref} with --clear-webhook-url sentinel (PR #28)",
     "cueapi agents delete <ref>": "DELETE /v1/agents/{ref} (PR #28; soft delete)",
     "cueapi agents webhook-secret get <ref>": "GET /v1/agents/{ref}/webhook-secret (PR #28)",
@@ -54,7 +54,8 @@
     "cueapi messages send": "POST /v1/messages (PR #29; --from in X-Cueapi-From-Agent header, --idempotency-key in Idempotency-Key header)",
     "cueapi messages get <id>": "GET /v1/messages/{id} (PR #29)",
     "cueapi messages read <id>": "POST /v1/messages/{id}/read (PR #29; idempotent)",
-    "cueapi messages ack <id>": "POST /v1/messages/{id}/ack (PR #29; terminal)"
+    "cueapi messages ack <id>": "POST /v1/messages/{id}/ack (PR #29; terminal)",
+    "cueapi message-to <recipient>": "POST /v1/messages with pre-flight resolve via GET /v1/agents/{name} (PR #40; agent-directory PRD Surface 3 — universal inter-agent comm primitive replacing the 6-field cue-fire incantation). Accepts agent_id (agt_*), slug-form (slug@user), or bare name (resolved by listing agents). --mode <live|bg|inbox|webhook|auto> per PR #41 sets `delivery_mode` on the message body (Surface 6); default-omit discipline — only sent when user opts in. Server response renders `effective_delivery_mode` when present."
   },
 
   "endpoints_missing": {
@@ -105,6 +106,29 @@
         "--outcome-state", "--result-type", "--has-evidence", "--triggered-by"
       ],
       "missing_flags": []
+    },
+    "cueapi agents list": {
+      "covered_flags": [
+        "--status", "--online-only", "--limit", "--offset"
+      ],
+      "missing_flags": [],
+      "notes": "PR #40 added --online-only as a convenience for --status online. Mutex with --status (raises UsageError before any HTTP call)."
+    },
+    "cueapi message-to": {
+      "covered_flags": [
+        "--from (or $CUEAPI_MY_AGENT_SLUG)",
+        "--body", "--subject",
+        "--reply-to", "--reply-to-agent",
+        "--priority (Click IntRange(1,5))",
+        "--expects-reply",
+        "--metadata (JSON)",
+        "--idempotency-key (≤255 chars, client-enforced)",
+        "--token (auto-fills --subject as `[TOKEN] <first-body-line>` and stashes in metadata.token)",
+        "--skip-resolve (bypass pre-flight GET /agents/{name})",
+        "--mode <live|bg|inbox|webhook|auto> (PR #41; Surface 6 delivery_mode; default-omit)"
+      ],
+      "missing_flags": [],
+      "notes": "Pre-flight resolve is the default to fail fast on typo'd recipients. Server signals surfaced: dedup-hit (200 vs 201) renders 'Idempotency-Key dedup hit'; X-CueAPI-Priority-Downgraded: true rendered when receiver-pair limits apply. PR #41 --mode is flag-passing only — depends on hosted Surface 6 schema-lock PR for end-to-end delivery_mode behavior."
     }
   },
 
@@ -117,8 +141,10 @@
     "Remaining create + update flags (delivery / alerts / catch-up / verification / on-success-fire / status) → ported via cueapi-cli #30 (merged 2026-05-04T19:08:08Z). Click Choice validation on --catch-up + --status.",
     "Executions verification surface (replay / verify / verification-pending) → ported via cueapi-cli #31 (merged 2026-05-04T19:23:30Z). verify is tri-state; --reason capped at 500 chars client-side.",
     "Workers fleet + user-level webhook-secret → ported via cueapi-cli #33 (merged 2026-05-04T19:00:11Z). New `cueapi workers` top-level group + nested `cueapi key webhook-secret`. X-Confirm-Destructive sent automatically on regenerate paths.",
-    "PR #618 (per-fire send_at scheduling) → port in flight on cueapi-cli #37 (opened 2026-05-04). Adds --send-at to `cueapi fire`."
+    "PR #618 (per-fire send_at scheduling) → port in flight on cueapi-cli #37 (opened 2026-05-04). Adds --send-at to `cueapi fire`.",
+    "Agent-directory PRD Surface 3 (CLI ergonomics for messaging primitive) → ported via cueapi-cli #40. Adds top-level `cueapi message-to <recipient>` (POST /v1/messages with pre-flight resolve), `cueapi agents list --online-only` convenience flag (mutex with --status), and `cueapi agents describe <ref>` verb alias for `cueapi agents get`. Replaces per-agent reply-script anti-pattern (cue-mac-app `Scripts/cma-reply.sh` etc.) with one canonical CLI command.",
+    "Agent-directory PRD Surface 6 (delivery_mode flag-passing) → ported via cueapi-cli #41. Adds `--mode <live|bg|inbox|webhook|auto>` to `cueapi message-to` with default-omit discipline (only sent when opted in). Renders `effective_delivery_mode` from the server response. Flag-passing only — depends on hosted Surface 6 schema-lock PR for end-to-end behavior."
   ],
 
-  "notes": "Updated 2026-05-04 to reflect the 8-PR parity wave (cueapi-cli #26 / #27 / #28 / #29 / #30 / #31 / #33 + #37 in flight). The CLI is now feature-complete against the manifest's `endpoints_missing` (only the deliberately-skipped POST /v1/worker/heartbeat remains, with the tracked rationale that cueapi-worker is the canonical wrapper for that endpoint). Only `--transport` flag on `cueapi create` is still flagged in `command_drift` — that's a refactor concern (decouple from --worker) rather than a simple flag addition. Schema mirrors cueapi-python's manifest. The `endpoints_missing` and `command_drift` sections are the audit checklist."
+  "notes": "Updated 2026-05-05 to reflect post-#40/#41 surface (agent-directory PRD Surfaces 3 + 6). The CLI is now feature-complete against the manifest's `endpoints_missing` (only the deliberately-skipped POST /v1/worker/heartbeat remains, with the tracked rationale that cueapi-worker is the canonical wrapper for that endpoint). Only `--transport` flag on `cueapi create` is still flagged in `command_drift` — that's a refactor concern (decouple from --worker) rather than a simple flag addition. Schema mirrors cueapi-python's manifest. The `endpoints_missing` and `command_drift` sections are the audit checklist."
 }
