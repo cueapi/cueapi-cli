@@ -2,6 +2,13 @@
 
 All notable changes to cueapi-cli will be documented here.
 
+## [Unreleased]
+
+### Added
+- `cueapi message-to <recipient>` top-level wrapper for sending a message by name. Resolves `<recipient>` against your agent roster: `agent_id` (`agt_*`) and slug-form (`slug@user`) pass through unchanged; bare names match case-insensitively against `display_name` and `slug` via `GET /agents`. Same flag set as `messages send` (sans `--to`).
+- `agents list --online-only` shortcut for `--status online`. Mutually exclusive with `--status`.
+- `agents describe <ref>` alias for `agents get <ref>`.
+
 ## [0.2.0] - 2026-05-01
 
 ### Added
