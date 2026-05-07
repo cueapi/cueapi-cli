@@ -1821,6 +1821,8 @@ def test_messages_send_help_lists_required_flags():
     assert "--to" in result.output
     assert "--body" in result.output
     assert "--idempotency-key" in result.output
+    # Hosted PR #623 parity — per-message scheduling
+    assert "--send-at" in result.output
 
 
 def test_messages_send_requires_from_and_to_and_body():

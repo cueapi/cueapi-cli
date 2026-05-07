@@ -1893,6 +1893,17 @@ def messages() -> None:
         "different body returns HTTP 409 idempotency_key_conflict."
     ),
 )
+@click.option(
+    "--send-at",
+    "send_at",
+    default=None,
+    help=(
+        "Optional ISO 8601 timestamp to delay this message's delivery (hosted PR "
+        "#623). When omitted, the message is delivered immediately. When provided, "
+        "the server stores send_at on the message row and the worker picks it up "
+        "when due. Past timestamps are treated as 'send now' (idempotent — no error)."
+    ),
+)
 @click.pass_context
 def messages_send(
     ctx: click.Context,
@@ -1906,6 +1917,7 @@ def messages_send(
     reply_to_agent: Optional[str],
     metadata: Optional[str],
     idempotency_key: Optional[str],
+    send_at: Optional[str],
 ) -> None:
     """Send a message."""
     body: dict = {"to": to, "body": body_text}
@@ -1926,6 +1938,10 @@ def messages_send(
             body["metadata"] = json.loads(metadata)
         except json.JSONDecodeError:
             raise click.UsageError("--metadata must be valid JSON")
+    if send_at:
+        # Body field on /v1/messages (cueapi #623 — server's MessageCreate
+        # schema accepts send_at as a body field).
+        body["send_at"] = send_at
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:
