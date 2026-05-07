@@ -5,6 +5,7 @@ No live API calls — tests only verify CLI entry points, help text, and argumen
 
 from typing import Any, Optional
 
+import pytest
 from click.testing import CliRunner
 
 from cueapi.cli import main
@@ -2599,3 +2600,149 @@ def test_top_level_help_lists_message_to():
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "message-to" in result.output
+
+
+# --- message-to --mode flag (Surface 6 delivery_mode) ---
+
+
+def test_message_to_mode_default_auto_omits_field(monkeypatch):
+    # Default is `auto` and the server treats absent == auto, so we don't
+    # send the field on the common path — keeps wire-format identical to
+    # pre-Surface-6 senders and avoids payload noise.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert "delivery_mode" not in body
+
+
+def test_message_to_mode_explicit_auto_still_omits_field(monkeypatch):
+    # User explicitly typing --mode auto is the same wire-format as omitting
+    # it. No reason to send the redundant field.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi", "--mode", "auto"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert "delivery_mode" not in body
+
+
+@pytest.mark.parametrize("mode", ["live", "bg", "inbox", "webhook"])
+def test_message_to_mode_non_auto_passed_through(monkeypatch, mode):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "msg_z",
+                    "delivery_state": "queued",
+                    "effective_delivery_mode": mode,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi", "--mode", mode],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["delivery_mode"] == mode
+    # echo_info pads labels — match the components, not the raw concat.
+    assert "Sent via:" in result.output
+    assert mode in result.output
+
+
+def test_message_to_mode_invalid_value_rejected_by_click():
+    # Click.Choice covers validation; we just confirm the gate is in place
+    # so a typo doesn't silently sail past as "auto".
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi", "--mode", "bogus"],
+    )
+    assert result.exit_code != 0
+    assert "bogus" in result.output or "invalid choice" in result.output.lower()
+
+
+def test_message_to_surfaces_downgraded_delivery_mode(monkeypatch):
+    # Server downgrade case: requested `live` but recipient has no live
+    # session, server delivered via inbox. CLI surfaces both the chosen
+    # mode and the "you asked for X" hint.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "msg_z",
+                    "delivery_state": "queued",
+                    "effective_delivery_mode": "inbox",
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi", "--mode", "live"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Sent via:" in result.output
+    assert "inbox" in result.output
+    assert "requested live" in result.output
+
+
+def test_message_to_omits_sent_via_when_server_does_not_return_it(monkeypatch):
+    # Pre-Surface-6 server (or auto + no field) returns no
+    # effective_delivery_mode. The CLI should not emit a "Sent via:" line.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Sent via:" not in result.output
+
+
+def test_message_to_help_lists_mode_flag():
+    result = runner.invoke(main, ["message-to", "--help"])
+    assert result.exit_code == 0
+    assert "--mode" in result.output
+    for choice in ("live", "bg", "inbox", "webhook", "auto"):
+        assert choice in result.output
