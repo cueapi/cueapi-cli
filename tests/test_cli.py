@@ -3618,3 +3618,28 @@ def test_agents_presence_requires_ref():
     result = runner.invoke(main, ["agents", "presence"])
     assert result.exit_code != 0
     assert "ref" in result.output.lower() or "missing" in result.output.lower()
+
+
+# --- bulk-delete (hosted PR #650 parity) ---
+
+
+def test_bulk_delete_help():
+    result = runner.invoke(main, ["bulk-delete", "--help"])
+    assert result.exit_code == 0
+    assert "100" in result.output  # max IDs callout
+    assert "--yes" in result.output
+
+
+def test_bulk_delete_requires_at_least_one_id():
+    result = runner.invoke(main, ["bulk-delete"])
+    assert result.exit_code != 0
+
+
+def test_bulk_delete_rejects_more_than_100_ids_pre_request():
+    """Pin: client-side cap of 100 prevents server roundtrip on obvious overruns."""
+    ids = [f"cue_test{i:03d}" for i in range(101)]
+    result = runner.invoke(main, ["bulk-delete", "--yes"] + ids)
+    # echo_error prints to the user; the command early-returns. The
+    # exit code shape is implementation-detail (echo_error may raise
+    # SystemExit). What matters is the cap message appears.
+    assert "100" in result.output

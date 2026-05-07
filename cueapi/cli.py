@@ -449,6 +449,74 @@ def delete(ctx: click.Context, cue_id: str, yes: bool) -> None:
         click.echo(str(e))
 
 
+@main.command(name="bulk-delete")
+@click.argument("cue_ids", nargs=-1, required=True)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def bulk_delete(ctx: click.Context, cue_ids: tuple, yes: bool) -> None:
+    """Delete multiple cues in a single call (max 100, hosted PR #650).
+
+    Per-ID atomic, NOT batch atomic — IDs that don't exist OR aren't owned
+    by the caller land in the response's `skipped` array (silent skip on
+    miss, no info leak about other tenants' cues). Cascade FK handles
+    executions + dispatch_outbox cleanup.
+
+    Server requires X-Confirm-Destructive: true header (sent automatically
+    after the local --yes confirmation).
+    """
+    if not cue_ids:
+        echo_error("At least one cue ID required")
+        return
+    if len(cue_ids) > 100:
+        echo_error(f"Max 100 IDs per call; got {len(cue_ids)}. Split into batches.")
+        return
+
+    if not yes:
+        click.echo(f"\nAbout to bulk-delete {len(cue_ids)} cue(s):")
+        for cue_id in list(cue_ids)[:10]:
+            click.echo(f"  - {cue_id}")
+        if len(cue_ids) > 10:
+            click.echo(f"  ... and {len(cue_ids) - 10} more")
+        if not click.confirm("\nProceed?"):
+            click.echo("Cancelled.")
+            return
+
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            # X-Confirm-Destructive is required by the server (mirrors
+            # POST /v1/auth/key/regenerate pattern).
+            resp = client.post(
+                "/cues/bulk-delete",
+                json={"ids": list(cue_ids)},
+                headers={"X-Confirm-Destructive": "true"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                deleted = data.get("deleted", [])
+                skipped = data.get("skipped", [])
+                click.echo()
+                if deleted:
+                    echo_success(f"Deleted {len(deleted)} cue(s)")
+                    for cue_id in deleted[:10]:
+                        click.echo(f"  ✓ {cue_id}")
+                    if len(deleted) > 10:
+                        click.echo(f"  ... and {len(deleted) - 10} more")
+                if skipped:
+                    echo_info("Skipped:", f"{len(skipped)} (not found or not owned)")
+                    for cue_id in skipped[:10]:
+                        click.echo(f"  · {cue_id}")
+                    if len(skipped) > 10:
+                        click.echo(f"  ... and {len(skipped) - 10} more")
+                click.echo()
+            elif resp.status_code == 400:
+                error = resp.json().get("detail", {}).get("error", {})
+                echo_error(error.get("message", f"Bad request (HTTP 400, {error.get('code', '?')})"))
+            else:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
 # --- Fire (ad-hoc trigger / messaging via cues) ---
 
 
