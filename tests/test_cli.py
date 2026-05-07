@@ -3595,3 +3595,26 @@ def test_subscriptions_help_lists_subcommands():
     assert result.exit_code == 0
     for sub in ("create", "list", "delete"):
         assert sub in result.output
+
+
+# --- agents roster + presence (hosted PR #630 + #662 parity) ---
+
+
+def test_agents_roster_help():
+    result = runner.invoke(main, ["agents", "roster", "--help"])
+    assert result.exit_code == 0
+    assert "roster" in result.output.lower() or "directory" in result.output.lower()
+    assert "--if-none-match" in result.output
+
+
+def test_agents_presence_help():
+    result = runner.invoke(main, ["agents", "presence", "--help"])
+    assert result.exit_code == 0
+    # Click shows REF in usage line for required args
+    assert "ref" in result.output.lower() or "presence" in result.output.lower()
+
+
+def test_agents_presence_requires_ref():
+    result = runner.invoke(main, ["agents", "presence"])
+    assert result.exit_code != 0
+    assert "ref" in result.output.lower() or "missing" in result.output.lower()
