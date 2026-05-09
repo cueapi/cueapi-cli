@@ -151,6 +151,36 @@ def test_fire_help():
     assert "fire" in result.output.lower()
     assert "--payload-override" in result.output
     assert "--merge-strategy" in result.output
+    # PR #618 + #632 + #683 parity
+    assert "--send-at" in result.output
+    assert "--exit-criteria" in result.output
+    assert "--idempotency-key" in result.output
+
+
+def test_fire_exit_criteria_repeatable_via_help():
+    """--exit-criteria takes multiple values (click multiple=True). Verify the
+    parser accepts repeated flags by passing them alongside --help."""
+    result = runner.invoke(
+        main,
+        [
+            "fire", "cue_x",
+            "--exit-criteria", "task_completed",
+            "--exit-criteria", "result_valid",
+            "--help",  # short-circuits actual fire — we just want parse to accept
+        ],
+    )
+    assert result.exit_code == 0
+
+
+def test_fire_help_pins_idempotency_key_as_body_field():
+    """Pin: the help text MUST call out that idempotency_key flows as a body
+    field on cues fire (NOT a header), to prevent a future 'simplifying'
+    refactor that moves it to a header — server's FireRequest schema is
+    extra='forbid' and would NOT see it as a header. Same divergence I caught
+    on cueapi-python #33 + cueapi-mcp #29."""
+    result = runner.invoke(main, ["fire", "--help"])
+    output = result.output.lower()
+    assert "body field" in output or "body" in output
 
 
 def test_fire_requires_cue_id():

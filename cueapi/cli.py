@@ -464,6 +464,29 @@ def delete(ctx: click.Context, cue_id: str, yes: bool) -> None:
         "'fire now' (idempotent — no error). Hosted PR #618."
     ),
 )
+@click.option(
+    "--exit-criteria",
+    "exit_criteria",
+    multiple=True,
+    help=(
+        "Required-assertion key for §14 work-verification-light (hosted PR #632). "
+        "Repeat the flag for multiple keys (max 20). Receiver MUST report values for "
+        "every key under outcome.assertions; missing keys mark the execution "
+        "verification_failed. Pass --exit-criteria '' once to explicitly opt out of "
+        "cue-level required_assertions for this fire."
+    ),
+)
+@click.option(
+    "--idempotency-key",
+    "idempotency_key",
+    default=None,
+    help=(
+        "Opaque dedup key (≤256 chars, hosted PR #683). Same key on the same cue within "
+        "24h returns the cached execution without firing again. Same key + DIFFERENT body "
+        "returns 409 idempotency_key_conflict. Sent as a BODY field on cues fire (server "
+        "FireRequest schema; diverges from messaging primitive's Idempotency-Key header)."
+    ),
+)
 @click.pass_context
 def fire(
     ctx: click.Context,
@@ -471,6 +494,8 @@ def fire(
     payload_override: Optional[str],
     merge_strategy: Optional[str],
     send_at: Optional[str],
+    exit_criteria: tuple,
+    idempotency_key: Optional[str],
 ) -> None:
     """Fire an existing cue immediately, optionally overriding its payload."""
     body: dict = {}
@@ -483,6 +508,16 @@ def fire(
         body["merge_strategy"] = merge_strategy
     if send_at:
         body["send_at"] = send_at
+    if exit_criteria:
+        # click multiple=True yields a tuple. Single '' entry opts out by sending [].
+        if "" in exit_criteria:
+            body["exit_criteria"] = []
+        else:
+            body["exit_criteria"] = list(exit_criteria)
+    if idempotency_key:
+        # Body field on cues fire (NOT header — server FireRequest schema diverges
+        # from messaging primitive's Idempotency-Key header convention).
+        body["idempotency_key"] = idempotency_key
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
