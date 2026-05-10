@@ -1945,6 +1945,35 @@ def messages() -> None:
         "--send-at (PR #618). Sent as a BODY field on POST /v1/messages."
     ),
 )
+@click.option(
+    "--notify",
+    "notify",
+    multiple=True,
+    help=(
+        "§17 BCC-light (hosted PR #619): each agent in the list gets a stripped "
+        "notification copy (subject + sender + recipient + 1-line summary, no full body) "
+        "alongside the main delivery, sharing the main message's thread_id so notify "
+        "recipients can reply into the conversation. Repeat the flag for multiple "
+        "recipients (max 10). Each entry must be a fully-qualified agent ref (opaque "
+        "agt_xxx or slug-form agent@user). Self-bcc is silently de-duped server-side. "
+        "Notifications skip the monthly quota and are pinned to priority=3."
+    ),
+)
+@click.option(
+    "--mode",
+    "mode",
+    default="auto",
+    type=click.Choice(["live", "bg", "inbox", "webhook", "auto"]),
+    show_default=True,
+    help=(
+        "Surface 6 v2 delivery_mode hint (parity with `message-to`). "
+        "live = recipient's attached Live session; bg = spawn a fresh background "
+        "session; inbox = leave in inbox for pull; webhook = POST to recipient's "
+        "configured webhook; auto = server picks based on recipient capabilities "
+        "and may downgrade. The CLI omits the field on the wire when set to "
+        "`auto` (or omitted) — server treats absent === auto."
+    ),
+)
 @click.pass_context
 def messages_send(
     ctx: click.Context,
@@ -1959,6 +1988,8 @@ def messages_send(
     metadata: Optional[str],
     idempotency_key: Optional[str],
     send_at: Optional[str],
+    notify: tuple,
+    mode: str,
 ) -> None:
     """Send a message."""
     body: dict = {"to": to, "body": body_text}
@@ -1984,6 +2015,19 @@ def messages_send(
     # body field). Different from idempotency_key, which is a header.
     if send_at:
         body["send_at"] = send_at
+    # §17 BCC-light: list of agent refs gets a stripped notification copy
+    # alongside the main delivery (server contract: MessageCreate.notify
+    # field, max-10 server-validated). Default-omit when empty so the
+    # wire format matches pre-#619 senders (no payload noise on the
+    # common path).
+    if notify:
+        if len(notify) > 10:
+            raise click.UsageError("--notify accepts at most 10 entries (server cap)")
+        body["notify"] = list(notify)
+    # Surface 6 v2 delivery_mode — default-omit `auto` to keep wire-format
+    # identical to pre-Surface-6 senders. Server treats absent === auto.
+    if mode != "auto":
+        body["delivery_mode"] = mode
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:
@@ -2269,6 +2313,18 @@ def _resolve_recipient(client, recipient: str) -> str:
         "--send-at (PR #618). Sent as a BODY field on POST /v1/messages."
     ),
 )
+@click.option(
+    "--notify",
+    "notify",
+    multiple=True,
+    help=(
+        "§17 BCC-light (hosted PR #619): each agent in the list gets a stripped "
+        "notification copy alongside the main delivery, sharing the main message's "
+        "thread_id. Repeat the flag for multiple recipients (max 10). Each entry "
+        "must be a fully-qualified agent ref. Self-bcc silently de-duped server-side. "
+        "Notifications skip the monthly quota and are pinned to priority=3."
+    ),
+)
 @click.pass_context
 def message_to(
     ctx: click.Context,
@@ -2284,6 +2340,7 @@ def message_to(
     mode: str,
     idempotency_key: Optional[str],
     send_at: Optional[str],
+    notify: tuple,
 ) -> None:
     """Send a message to a recipient by name, slug, or agent ID.
 
@@ -2318,6 +2375,13 @@ def message_to(
     # which is a header.
     if send_at:
         body["send_at"] = send_at
+    # §17 BCC-light: list of agent refs gets a stripped notification copy
+    # alongside the main delivery (server contract: MessageCreate.notify,
+    # max-10 server-validated). Default-omit when empty.
+    if notify:
+        if len(notify) > 10:
+            raise click.UsageError("--notify accepts at most 10 entries (server cap)")
+        body["notify"] = list(notify)
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:

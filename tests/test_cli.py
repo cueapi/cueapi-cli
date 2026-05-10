@@ -2045,6 +2045,155 @@ def test_messages_send_omits_expects_reply_when_unset(monkeypatch):
     assert "expects_reply" not in body
 
 
+def test_messages_send_notify_passed_as_body_list(monkeypatch):
+    # §17 BCC-light: notify flows in body as a list (server contract:
+    # MessageCreate.notify, app/schemas/message.py).
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi",
+         "--notify", "agt_a", "--notify", "agt_b"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["notify"] == ["agt_a", "agt_b"]
+
+
+def test_messages_send_notify_omitted_when_unset(monkeypatch):
+    # Default-omit: empty notify must not appear on the wire (matches
+    # pre-#619 senders).
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "notify" not in body
+
+
+def test_messages_send_notify_max_10_enforced_client_side():
+    # Server caps at 10; CLI rejects 11+ before hitting the wire to
+    # surface the error at parse time instead of as a 422.
+    eleven = [arg for ref in [f"agt_{i}" for i in range(11)] for arg in ("--notify", ref)]
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi", *eleven],
+    )
+    assert result.exit_code != 0
+    assert "at most 10" in result.output
+
+
+def test_messages_send_mode_default_omitted(monkeypatch):
+    # Surface 6 v2: default mode=auto is omitted on the wire (matches
+    # pre-Surface-6 senders).
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "delivery_mode" not in body
+
+
+def test_messages_send_mode_explicit_passed_through(monkeypatch):
+    # Explicit non-auto modes flow as body.delivery_mode.
+    for mode_value in ("live", "bg", "inbox", "webhook"):
+        holder: dict = {}
+        _patch_messages_client(
+            monkeypatch,
+            holder,
+            responses={
+                ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+            },
+        )
+        result = runner.invoke(
+            main,
+            ["messages", "send", "--from", "x", "--to", "y", "--body", "hi", "--mode", mode_value],
+        )
+        assert result.exit_code == 0, result.output
+        body = holder["client"].calls[-1][2]
+        assert body["delivery_mode"] == mode_value
+
+
+def test_messages_send_mode_auto_explicitly_omitted(monkeypatch):
+    # Even when caller explicitly passes --mode auto, omit on the wire.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi", "--mode", "auto"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "delivery_mode" not in body
+
+
+def test_message_to_notify_passed_as_body_list(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_z", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi",
+         "--notify", "agt_a", "--notify", "agt_b"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["notify"] == ["agt_a", "agt_b"]
+
+
+def test_message_to_notify_omitted_when_unset(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_z", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "notify" not in body
+
+
 def test_messages_send_priority_validated_by_click_intrange():
     result = runner.invoke(
         main,
