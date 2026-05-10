@@ -1969,6 +1969,61 @@ def test_messages_send_with_all_optionals(monkeypatch):
     assert headers["Idempotency-Key"] == "idemp-key-1"
 
 
+def test_messages_send_send_at_omitted_by_default(monkeypatch):
+    # Wire-format must match pre-#623 senders when --send-at is not passed.
+    # Server contract: NULL send_at === deliver immediately.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "sender@x", "--to", "recipient@y", "--body", "hello"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert "send_at" not in body
+
+
+def test_messages_send_send_at_passed_in_body(monkeypatch):
+    # send_at flows in the body (server contract: MessageCreate.send_at,
+    # app/schemas/message.py). Mirrors cue-fire send_at transport.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued"}
+            )
+        },
+    )
+    future = "2099-01-01T00:00:00Z"
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "sender@x",
+            "--to", "recipient@y",
+            "--body", "hello",
+            "--send-at", future,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["send_at"] == future
+    # Verify it's a body field, NOT a header (regression guard).
+    headers = holder["client"].calls[-1][3]
+    assert "Send-At" not in headers
+    assert "X-Cueapi-Send-At" not in headers
+
+
 def test_messages_send_omits_expects_reply_when_unset(monkeypatch):
     # Default false MUST NOT appear in the body — server's Pydantic default
     # is false, and sending `expects_reply: false` explicitly creates noise.
@@ -2609,6 +2664,56 @@ def test_message_to_omits_expects_reply_when_unset(monkeypatch):
     assert result.exit_code == 0
     body = holder["client"].calls[-1][2]
     assert "expects_reply" not in body
+
+
+def test_message_to_send_at_passed_in_body(monkeypatch):
+    # Same parity as `messages send` — send_at flows in body, not header.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    future = "2099-01-01T00:00:00Z"
+    result = runner.invoke(
+        main,
+        [
+            "message-to", "agt_x",
+            "--from", "y@z",
+            "--body", "hi",
+            "--send-at", future,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["send_at"] == future
+    headers = holder["client"].calls[-1][3]
+    assert "Send-At" not in headers
+    assert "X-Cueapi-Send-At" not in headers
+
+
+def test_message_to_send_at_omitted_when_unset(monkeypatch):
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_z", "delivery_state": "queued"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["message-to", "agt_x", "--from", "y@z", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "send_at" not in body
 
 
 def test_message_to_priority_validated_by_click_intrange():
