@@ -1932,6 +1932,19 @@ def messages() -> None:
         "different body returns HTTP 409 idempotency_key_conflict."
     ),
 )
+@click.option(
+    "--send-at",
+    "send_at",
+    default=None,
+    help=(
+        "Optional ISO 8601 timestamp to schedule this message for future delivery "
+        "(hosted PR #623, §13). Omitted = send now (server default). When set in the "
+        "future, the message sits in the recipient's inbox-query gate until "
+        "send-at <= now(); push-delivery dispatch is also gated. Past timestamps "
+        "are treated as send-now (forgiving fallback). Same semantics as cue-fire "
+        "--send-at (PR #618). Sent as a BODY field on POST /v1/messages."
+    ),
+)
 @click.pass_context
 def messages_send(
     ctx: click.Context,
@@ -1945,6 +1958,7 @@ def messages_send(
     reply_to_agent: Optional[str],
     metadata: Optional[str],
     idempotency_key: Optional[str],
+    send_at: Optional[str],
 ) -> None:
     """Send a message."""
     body: dict = {"to": to, "body": body_text}
@@ -1965,6 +1979,11 @@ def messages_send(
             body["metadata"] = json.loads(metadata)
         except json.JSONDecodeError:
             raise click.UsageError("--metadata must be valid JSON")
+    # send_at flows in the body (server contract: MessageCreate.send_at,
+    # app/schemas/message.py). Mirrors cue-fire send_at transport (also a
+    # body field). Different from idempotency_key, which is a header.
+    if send_at:
+        body["send_at"] = send_at
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:
@@ -2237,6 +2256,19 @@ def _resolve_recipient(client, recipient: str) -> str:
         "24h returns the existing message with HTTP 200 instead of 201."
     ),
 )
+@click.option(
+    "--send-at",
+    "send_at",
+    default=None,
+    help=(
+        "Optional ISO 8601 timestamp to schedule this message for future delivery "
+        "(hosted PR #623, §13). Omitted = send now (server default). When set in the "
+        "future, the message sits in the recipient's inbox-query gate until "
+        "send-at <= now(); push-delivery dispatch is also gated. Past timestamps "
+        "are treated as send-now (forgiving fallback). Same semantics as cue-fire "
+        "--send-at (PR #618). Sent as a BODY field on POST /v1/messages."
+    ),
+)
 @click.pass_context
 def message_to(
     ctx: click.Context,
@@ -2251,6 +2283,7 @@ def message_to(
     metadata: Optional[str],
     mode: str,
     idempotency_key: Optional[str],
+    send_at: Optional[str],
 ) -> None:
     """Send a message to a recipient by name, slug, or agent ID.
 
@@ -2280,6 +2313,11 @@ def message_to(
     # senders. `auto` is also redundant to send.
     if mode != "auto":
         body["delivery_mode"] = mode
+    # send_at flows in the body (server contract: MessageCreate.send_at).
+    # Mirrors cue-fire send_at transport. Different from idempotency_key,
+    # which is a header.
+    if send_at:
+        body["send_at"] = send_at
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:
