@@ -1662,7 +1662,11 @@ def agents_webhook_secret_regenerate(ctx: click.Context, ref: str, yes: bool) ->
             return
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
-            resp = client.post(f"/agents/{ref}/webhook-secret/regenerate", json={})
+            resp = client.post(
+                f"/agents/{ref}/webhook-secret/regenerate",
+                json={},
+                headers={"X-Confirm-Destructive": "true"},
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 click.echo()

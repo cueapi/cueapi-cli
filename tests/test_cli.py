@@ -682,6 +682,34 @@ def test_agents_webhook_secret_regenerate_with_yes(monkeypatch):
     assert "save now" in result.output.lower() or "shown once" in result.output.lower()
 
 
+def test_agents_webhook_secret_regenerate_sends_destructive_header(monkeypatch):
+    """Pin: `cueapi agents webhook-secret regenerate` MUST send
+    `X-Confirm-Destructive: true` header — server requires it (Bug
+    cmp03hy9o, surfaced 2026-05-10 from Phase 2 messaging smoke).
+    Mirrors the same header pin on `cueapi key webhook-secret regenerate`.
+    """
+    holder: dict = {}
+    _patch_ws_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents/agt_x/webhook-secret/regenerate"): lambda: _FakeResp(
+                200, {"webhook_secret": "wsec_new"}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["agents", "webhook-secret", "regenerate", "agt_x", "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    method, path, body, headers = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/agents/agt_x/webhook-secret/regenerate"
+    assert headers == {"X-Confirm-Destructive": "true"}
+    assert "wsec_new" in result.output
+
+
 # --- inbox / sent ---
 
 
