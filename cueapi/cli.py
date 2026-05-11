@@ -1896,6 +1896,46 @@ main.add_command(workers)
 _BODY_METACHAR_RE = re.compile(r"\$\(|`|\$\{")
 
 
+def _first_divergence_byte(a: str, b: str) -> int:
+    """Return byte index of first differing position. -1 if equal OR
+    one is a proper prefix of the other (caller distinguishes via
+    len() comparison)."""
+    common = min(len(a), len(b))
+    for i in range(common):
+        if a[i] != b[i]:
+            return i
+    return -1
+
+
+def _emit_body_verify_mismatch_diagnostic(*, sent: str, received: str, msg_id: str) -> None:
+    """Print actionable diff + byte-position-of-first-divergence per
+    Q-C3 contract. CLI exits 7 after this is called (caller responsibility)."""
+    divergence = _first_divergence_byte(sent, received)
+    if divergence == -1 and len(sent) != len(received):
+        # One body is a proper prefix of the other — length mismatch.
+        divergence = min(len(sent), len(received))
+    click.echo(
+        f"[cueapi-cli] body verify-echo MISMATCH at byte {divergence}",
+        err=True,
+    )
+    click.echo(
+        f"sent ({len(sent)} bytes, first 200 chars):    {sent[:200]!r}",
+        err=True,
+    )
+    click.echo(
+        f"received ({len(received)} bytes, first 200 chars): {received[:200]!r}",
+        err=True,
+    )
+    click.echo("", err=True)
+    click.echo(
+        "Caller's shell may have expanded $(...)/backticks/${VAR} in body BEFORE "
+        "cueapi-cli received the arg. Fix: use --message-file <path> (mint body via "
+        "heredoc with quoted EOF marker) or --body-stdin to pipe content.",
+        err=True,
+    )
+    click.echo(f"Message ID (mutated content stored server-side): {msg_id}", err=True)
+
+
 def _acquire_message_body(
     body_text: Optional[str],
     message_file: Optional[str],
@@ -2016,6 +2056,20 @@ def messages() -> None:
         "literal $(...) text). Otherwise prefer --message-file."
     ),
 )
+@click.option(
+    "--no-verify",
+    "no_verify",
+    is_flag=True,
+    default=False,
+    help=(
+        "Opt out of Phase 2 body-verify auto-echo (Mike body-verify "
+        "directive 2026-05-11). Default is verify-on: SDK sends "
+        "X-CueAPI-Verify-Echo header + checks substrate-echoed body matches "
+        "sent body, exiting 7 with diff on drift. Use --no-verify for "
+        "perf-sensitive flows (rare; verify adds zero substrate roundtrips "
+        "since the echo rides in the same POST response)."
+    ),
+)
 @click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
 @click.option(
     "--reply-to",
@@ -2104,6 +2158,7 @@ def messages_send(
     message_file: Optional[str],
     body_stdin: bool,
     allow_inline_metachars: bool,
+    no_verify: bool,
     subject: Optional[str],
     reply_to: Optional[str],
     priority: Optional[int],
@@ -2161,12 +2216,28 @@ def messages_send(
         if len(idempotency_key) > 255:
             raise click.UsageError("--idempotency-key must be ≤255 characters")
         headers["Idempotency-Key"] = idempotency_key
+    if not no_verify:
+        # Phase 2 of body-verify defense in depth (Mike directive 2026-05-11).
+        # Substrate echoes body_received in the 201 response when this header
+        # is set. CLI diffs sent vs received + exits 7 on mismatch with diff
+        # output. --no-verify opts out (rare; perf-sensitive flows only).
+        headers["X-CueAPI-Verify-Echo"] = "true"
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             resp = client.post("/messages", json=body, headers=headers)
             if resp.status_code in (200, 201):
                 m = resp.json()
+                # Phase 2 body-verify check. Substrate echoes body_received
+                # when header set; missing field = pre-Layer-1 substrate, no-op.
+                if not no_verify and isinstance(m, dict):
+                    received = m.get("body_received")
+                    if received is not None and received != resolved_body:
+                        _emit_body_verify_mismatch_diagnostic(
+                            sent=resolved_body, received=received,
+                            msg_id=m.get("id", "<unknown>"),
+                        )
+                        ctx.exit(7)
                 click.echo()
                 if resp.status_code == 200:
                     # Dedup hit on Idempotency-Key — same key + same body returned
@@ -2406,6 +2477,13 @@ def _resolve_recipient(client, recipient: str) -> str:
     default=False,
     help="Override the Layer 3 force-file guard for legitimate literal-metachar inline content.",
 )
+@click.option(
+    "--no-verify",
+    "no_verify",
+    is_flag=True,
+    default=False,
+    help="Opt out of Phase 2 body-verify auto-echo. Default verify-on.",
+)
 @click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
 @click.option(
     "--reply-to",
@@ -2491,6 +2569,7 @@ def message_to(
     message_file: Optional[str],
     body_stdin: bool,
     allow_inline_metachars: bool,
+    no_verify: bool,
     subject: Optional[str],
     reply_to: Optional[str],
     priority: Optional[int],
@@ -2551,6 +2630,9 @@ def message_to(
         if len(idempotency_key) > 255:
             raise click.UsageError("--idempotency-key must be ≤255 characters")
         headers["Idempotency-Key"] = idempotency_key
+    if not no_verify:
+        # Phase 2 body-verify echo (mirror of messages_send).
+        headers["X-CueAPI-Verify-Echo"] = "true"
 
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
@@ -2564,6 +2646,14 @@ def message_to(
             resp = client.post("/messages", json=body, headers=headers)
             if resp.status_code in (200, 201):
                 m = resp.json()
+                if not no_verify and isinstance(m, dict):
+                    received = m.get("body_received")
+                    if received is not None and received != resolved_body:
+                        _emit_body_verify_mismatch_diagnostic(
+                            sent=resolved_body, received=received,
+                            msg_id=m.get("id", "<unknown>"),
+                        )
+                        ctx.exit(7)
                 click.echo()
                 if resp.status_code == 200:
                     echo_info("Idempotency-Key dedup hit:", "existing message returned")

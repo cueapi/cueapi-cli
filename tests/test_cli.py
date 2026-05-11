@@ -2046,6 +2046,115 @@ def test_message_to_rejects_inline_body_with_metachars():
     assert "shell metacharacters" in r.output
 
 
+# --- Phase 2: auto-verify body echo ---
+
+
+def test_messages_send_default_adds_verify_echo_header(monkeypatch):
+    """Default auto-verify-on adds X-CueAPI-Verify-Echo: true header."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y", "--body", "plain"],
+    )
+    assert r.exit_code == 0, r.output
+    _, _, _, headers = holder["client"].calls[-1]
+    assert headers.get("X-CueAPI-Verify-Echo") == "true"
+
+
+def test_messages_send_no_verify_omits_header(monkeypatch):
+    """--no-verify opt-out omits the X-CueAPI-Verify-Echo header."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "plain", "--no-verify"],
+    )
+    assert r.exit_code == 0, r.output
+    _, _, _, headers = holder["client"].calls[-1]
+    assert "X-CueAPI-Verify-Echo" not in headers
+
+
+def test_messages_send_verify_passes_byte_identical(monkeypatch):
+    """Substrate echoes back same body → success."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued",
+                      "body_received": "plain"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y", "--body", "plain"],
+    )
+    assert r.exit_code == 0, r.output
+
+
+def test_messages_send_verify_fails_loud_on_mismatch(monkeypatch):
+    """Substrate echoes back DIFFERENT body → exit 7 + diff diagnostic."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_mutated", "delivery_state": "queued",
+                      "body_received": "body received by substrate (mutated)"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "body sent by caller (intended)"],
+    )
+    # Exit code 7 = body verify mismatch (distinct from generic failure)
+    assert r.exit_code == 7
+    assert "MISMATCH" in r.output
+
+
+def test_messages_send_verify_noop_when_substrate_omits_echo(monkeypatch):
+    """Backward-compat: pre-Layer-1 substrate omits body_received → no raise."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued"},
+                # No body_received field
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y", "--body", "plain"],
+    )
+    assert r.exit_code == 0, r.output
+
+
 # --- send body + headers ---
 
 
