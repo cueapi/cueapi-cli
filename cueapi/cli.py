@@ -1783,6 +1783,106 @@ def agents_sent(
         click.echo(str(e))
 
 
+@agents.command(name="roster")
+@click.option(
+    "--if-none-match",
+    "if_none_match",
+    default=None,
+    help=(
+        "Optional ETag from a prior call. When the directory hasn't changed since "
+        "that ETag, server returns 304 Not Modified — caller can reuse cached "
+        "payload. Sent as If-None-Match header. Hosted PR #630."
+    ),
+)
+@click.pass_context
+def agents_roster(
+    ctx: click.Context,
+    if_none_match: Optional[str],
+) -> None:
+    """Get the agent directory — every agent owned by the calling key with a presence block.
+
+    Used for directory UIs and for senders that want to choose recipients based
+    on presence. ETag-aware: pass --if-none-match to cheap-poll without
+    re-fetching the payload when the directory hasn't shifted.
+    """
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            headers = {}
+            if if_none_match:
+                headers["If-None-Match"] = if_none_match
+            resp = client.get("/agents/roster", headers=headers if headers else None)
+            if resp.status_code == 304:
+                click.echo("\nNot modified (ETag matched; cached payload still current).\n")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            agents_list = data.get("agents", [])
+            etag = data.get("etag", "?")
+            if not agents_list:
+                click.echo("\nNo agents in roster.\n")
+                return
+            click.echo()
+            rows = []
+            for a in agents_list:
+                rows.append([
+                    a.get("slug", "?"),
+                    a.get("display_name", "?")[:24],
+                    format_status(a.get("derived_status", "?")),
+                    a.get("bucketed_seen", "?"),
+                    "yes" if a.get("online") else "no",
+                ])
+            echo_table(["SLUG", "DISPLAY NAME", "STATUS", "SEEN", "ONLINE"], rows, widths=[20, 26, 14, 14, 8])
+            click.echo(f"\netag: {etag}\n")
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
+@agents.command(name="presence")
+@click.argument("ref")
+@click.pass_context
+def agents_presence(ctx: click.Context, ref: str) -> None:
+    """Cheap-poll a single agent's presence block.
+
+    Lighter than `agents get <ref>` — returns just presence-relevant fields
+    (online, derived_status, bucketed_seen, default_live, labeled_sessions, etag)
+    without the full agent record. Designed for tools that refresh a single
+    agent's status every few seconds without re-fetching the full directory.
+    Hosted PR #662.
+    """
+    try:
+        with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
+            resp = client.get(f"/agents/{ref}/presence")
+            if resp.status_code == 404:
+                echo_error(f"Agent not found: {ref}")
+                return
+            if resp.status_code != 200:
+                echo_error(f"Failed (HTTP {resp.status_code})")
+                return
+            data = resp.json()
+            click.echo()
+            echo_info("Slug:", data.get("slug", "?"))
+            echo_info("Online:", "yes" if data.get("online") else "no")
+            echo_info("Derived status:", format_status(data.get("derived_status", "?")))
+            echo_info("Bucketed seen:", data.get("bucketed_seen", "?"))
+            default_live = data.get("default_live")
+            if default_live:
+                cue_id = default_live.get("cue_id", "?")
+                heartbeat_age = default_live.get("heartbeat_age_sec")
+                age_str = f" (heartbeat {heartbeat_age}s ago)" if heartbeat_age is not None else ""
+                echo_info("Default live:", f"{cue_id}{age_str}")
+            labeled = data.get("labeled_sessions", [])
+            if labeled:
+                echo_info("Labeled sessions:", str(len(labeled)))
+            etag = data.get("etag")
+            if etag:
+                echo_info("Etag:", etag)
+            click.echo()
+    except click.ClickException as e:
+        click.echo(str(e))
+
+
 main.add_command(agents)
 
 
