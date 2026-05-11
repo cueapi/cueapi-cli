@@ -1888,9 +1888,162 @@ def test_messages_send_requires_from_and_to_and_body():
     # Missing --to
     r2 = runner.invoke(main, ["messages", "send", "--from", "x", "--body", "hi"])
     assert r2.exit_code != 0
-    # Missing --body
+    # Missing body source entirely (post-Phase-3: not just --body; any of
+    # --message-file / --body-stdin / --body works)
     r3 = runner.invoke(main, ["messages", "send", "--from", "x", "--to", "y"])
     assert r3.exit_code != 0
+
+
+# --- Phase 3: body-source acquisition (force-file mode) ---
+
+
+def test_messages_send_rejects_inline_body_with_dollar_paren():
+    """Layer 3 force-file guard: $(...) in inline body must be rejected."""
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "body with $(echo INJECT) embedded"],
+    )
+    assert r.exit_code != 0
+    assert "shell metacharacters" in r.output
+
+
+def test_messages_send_rejects_inline_body_with_backticks():
+    """Layer 3 force-file guard: backticks in inline body must be rejected."""
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "body with `echo INJECT` embedded"],
+    )
+    assert r.exit_code != 0
+    assert "shell metacharacters" in r.output
+
+
+def test_messages_send_rejects_inline_body_with_dollar_brace():
+    """Layer 3 force-file guard: ${VAR} in inline body must be rejected."""
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "body with ${VAR_INJECT} embedded"],
+    )
+    assert r.exit_code != 0
+    assert "shell metacharacters" in r.output
+
+
+def test_messages_send_accepts_inline_body_when_metachar_free(monkeypatch):
+    """Inline --body without metachars is accepted byte-identical."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_safe", "delivery_state": "queued", "thread_id": "thr_x"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "plain prose body without any metachars"],
+    )
+    assert r.exit_code == 0, r.output
+    _, _, body, _ = holder["client"].calls[-1]
+    assert body["body"] == "plain prose body without any metachars"
+
+
+def test_messages_send_accepts_inline_metachars_with_override(monkeypatch):
+    """--allow-inline-metachars override accepts inline body with $(...) etc."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_override", "delivery_state": "queued", "thread_id": "thr_x"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "body with $(echo LITERAL) intended verbatim",
+         "--allow-inline-metachars"],
+    )
+    assert r.exit_code == 0, r.output
+    _, _, body, _ = holder["client"].calls[-1]
+    assert body["body"] == "body with $(echo LITERAL) intended verbatim"
+
+
+def test_messages_send_accepts_message_file(monkeypatch, tmp_path):
+    """--message-file reads body from path byte-identical (incl. metachars)."""
+    body_file = tmp_path / "body.txt"
+    body_text = "metachar-rich body: $(echo X) and `echo Y` and ${HOME}"
+    body_file.write_text(body_text)
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_file", "delivery_state": "queued", "thread_id": "thr_x"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--message-file", str(body_file)],
+    )
+    assert r.exit_code == 0, r.output
+    _, _, body, _ = holder["client"].calls[-1]
+    assert body["body"] == body_text
+
+
+def test_messages_send_accepts_body_stdin(monkeypatch):
+    """--body-stdin reads body from stdin byte-identical."""
+    body_text = "stdin body with $(echo metachars) preserved"
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_stdin", "delivery_state": "queued", "thread_id": "thr_x"},
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y", "--body-stdin"],
+        input=body_text,
+    )
+    assert r.exit_code == 0, r.output
+    _, _, body, _ = holder["client"].calls[-1]
+    assert body["body"] == body_text
+
+
+def test_messages_send_rejects_multiple_body_sources():
+    """Exactly one of --body / --message-file / --body-stdin must be set."""
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y",
+         "--body", "inline body", "--body-stdin"],
+        input="stdin body",
+    )
+    assert r.exit_code != 0
+    assert "Multiple body sources" in r.output
+
+
+def test_message_to_rejects_inline_body_with_metachars():
+    """Parity: legacy `message-to` command applies same Layer 3 guard."""
+    r = runner.invoke(
+        main,
+        ["message-to", "recipient@y", "--from", "a@x",
+         "--body", "body with $(echo INJECT)"],
+    )
+    assert r.exit_code != 0
+    assert "shell metacharacters" in r.output
 
 
 # --- send body + headers ---
