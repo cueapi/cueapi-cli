@@ -2093,7 +2093,11 @@ def test_messages_send_no_verify_omits_header(monkeypatch):
 
 
 def test_messages_send_verify_passes_byte_identical(monkeypatch):
-    """Substrate echoes back same body → success."""
+    """Substrate echoes back same body in body_received.body → success.
+
+    Empirically-locked wire shape 2026-05-11: body_received is the
+    PARSED request dict, not a flat string. CLI extracts .body for diff.
+    """
     holder: dict = {}
     _patch_messages_client(
         monkeypatch,
@@ -2101,7 +2105,7 @@ def test_messages_send_verify_passes_byte_identical(monkeypatch):
         responses={
             ("POST", "/messages"): lambda: _FakeResp(
                 201, {"id": "msg_x", "delivery_state": "queued",
-                      "body_received": "plain"},
+                      "body_received": {"to": "b@y", "body": "plain", "subject": None, "priority": 3}},
             )
         },
     )
@@ -2113,7 +2117,7 @@ def test_messages_send_verify_passes_byte_identical(monkeypatch):
 
 
 def test_messages_send_verify_fails_loud_on_mismatch(monkeypatch):
-    """Substrate echoes back DIFFERENT body → exit 7 + diff diagnostic."""
+    """body_received.body differs from sent body → exit 7 + diff diagnostic."""
     holder: dict = {}
     _patch_messages_client(
         monkeypatch,
@@ -2121,7 +2125,8 @@ def test_messages_send_verify_fails_loud_on_mismatch(monkeypatch):
         responses={
             ("POST", "/messages"): lambda: _FakeResp(
                 201, {"id": "msg_mutated", "delivery_state": "queued",
-                      "body_received": "body received by substrate (mutated)"},
+                      "body_received": {"to": "b@y", "body": "body received by substrate (mutated)",
+                                        "subject": None, "priority": 3}},
             )
         },
     )
@@ -2133,6 +2138,30 @@ def test_messages_send_verify_fails_loud_on_mismatch(monkeypatch):
     # Exit code 7 = body verify mismatch (distinct from generic failure)
     assert r.exit_code == 7
     assert "MISMATCH" in r.output
+
+
+def test_messages_send_verify_handles_flat_string_body_received(monkeypatch):
+    """Defensive: future substrate rev flattens body_received → CLI still verifies.
+
+    Belt-and-suspenders for spec drift; cue-pm fired primary to fix
+    substrate to flat-string post-Phase-1-bug-headsup ~23:20Z.
+    """
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(
+                201, {"id": "msg_x", "delivery_state": "queued",
+                      "body_received": "plain"},  # flat-string variant
+            )
+        },
+    )
+    r = runner.invoke(
+        main,
+        ["messages", "send", "--from", "a@x", "--to", "b@y", "--body", "plain"],
+    )
+    assert r.exit_code == 0, r.output
 
 
 def test_messages_send_verify_noop_when_substrate_omits_echo(monkeypatch):

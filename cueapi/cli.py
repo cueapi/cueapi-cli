@@ -2228,10 +2228,18 @@ def messages_send(
             resp = client.post("/messages", json=body, headers=headers)
             if resp.status_code in (200, 201):
                 m = resp.json()
-                # Phase 2 body-verify check. Substrate echoes body_received
-                # when header set; missing field = pre-Layer-1 substrate, no-op.
+                # Phase 2 body-verify check. Empirically-locked wire shape
+                # (probed 2026-05-11 ~23:17Z): substrate echoes body_received
+                # as PARSED request dict, NOT flat string. Extract the body
+                # field for comparison. Defensive isinstance check handles
+                # future substrate rev that flattens echo back to a string.
                 if not no_verify and isinstance(m, dict):
-                    received = m.get("body_received")
+                    received_raw = m.get("body_received")
+                    received: Optional[str] = None
+                    if isinstance(received_raw, dict):
+                        received = received_raw.get("body")
+                    elif isinstance(received_raw, str):
+                        received = received_raw
                     if received is not None and received != resolved_body:
                         _emit_body_verify_mismatch_diagnostic(
                             sent=resolved_body, received=received,
