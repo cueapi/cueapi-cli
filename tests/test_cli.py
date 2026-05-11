@@ -3058,3 +3058,249 @@ def test_message_to_help_lists_mode_flag():
     assert "--mode" in result.output
     for choice in ("live", "bg", "inbox", "webhook", "auto"):
         assert choice in result.output
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Event-emit primitive (PR-1b) — events + subscriptions commands
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_events_list_basic(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x/events"): lambda: _FakeResp(
+                200,
+                {
+                    "events": [
+                        {"id": 1, "event_type": "message.received", "emitted_at": "2026-05-11T03:00:00Z"},
+                        {"id": 2, "event_type": "message.received", "emitted_at": "2026-05-11T03:01:00Z"},
+                    ],
+                    "next_cursor": 2,
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["events", "list", "agt_x"])
+    assert result.exit_code == 0, result.output
+    assert "message.received" in result.output
+    assert "Next cursor" in result.output
+
+
+def test_events_list_with_since_and_event_type(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x/events"): lambda: _FakeResp(
+                200, {"events": [], "next_cursor": 0}
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["events", "list", "agt_x", "--since", "42", "--event-type", "message.received"],
+    )
+    assert result.exit_code == 0, result.output
+    method, path, params = holder["client"].calls[-1]
+    assert method == "GET"
+    assert path == "/agents/agt_x/events"
+    assert params == {"limit": 100, "since": 42, "event_type": "message.received"}
+
+
+def test_events_list_defaults_only_limit(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x/events"): lambda: _FakeResp(
+                200, {"events": [], "next_cursor": 0}
+            )
+        },
+    )
+    result = runner.invoke(main, ["events", "list", "agt_x"])
+    assert result.exit_code == 0
+    method, path, params = holder["client"].calls[-1]
+    assert params == {"limit": 100}
+
+
+def test_events_list_404_agent_not_found(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/missing/events"): lambda: _FakeResp(
+                404, {"detail": {"error": {"code": "agent_not_found", "message": "agent not found"}}}
+            )
+        },
+    )
+    result = runner.invoke(main, ["events", "list", "missing"])
+    assert "Agent not found" in result.output
+
+
+def test_subscriptions_create_pull_minimal(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "sub_uuid",
+                    "event_type": "message.received",
+                    "delivery_target": "pull",
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "subscriptions", "create", "agt_x",
+            "--event-type", "message.received",
+            "--delivery-target", "pull",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    method, path, body = holder["client"].calls[-1]
+    assert method == "POST"
+    assert path == "/agents/agt_x/subscriptions"
+    assert body == {"event_type": "message.received", "delivery_target": "pull"}
+    assert "Subscription created" in result.output
+
+
+def test_subscriptions_create_webhook_with_url(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "sub_uuid",
+                    "event_type": "message.received",
+                    "delivery_target": "webhook",
+                    "webhook_secret": "wsec_oneshot",
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "subscriptions", "create", "agt_x",
+            "--event-type", "message.received",
+            "--delivery-target", "webhook",
+            "--webhook-url", "https://example.com/hook",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body == {
+        "event_type": "message.received",
+        "delivery_target": "webhook",
+        "webhook_url": "https://example.com/hook",
+    }
+    # Webhook secret must be surfaced (one-shot reveal).
+    assert "wsec_oneshot" in result.output
+
+
+def test_subscriptions_create_webhook_without_url_errors():
+    # Client-side guard — surface the requirement at parse time
+    # instead of letting the server 400 it.
+    result = runner.invoke(
+        main,
+        [
+            "subscriptions", "create", "agt_x",
+            "--event-type", "message.received",
+            "--delivery-target", "webhook",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--webhook-url is required" in result.output
+
+
+def test_subscriptions_list_basic(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                200,
+                {
+                    "subscriptions": [
+                        {
+                            "id": "sub_uuid_1",
+                            "event_type": "message.received",
+                            "delivery_target": "pull",
+                        },
+                        {
+                            "id": "sub_uuid_2",
+                            "event_type": "message.received",
+                            "delivery_target": "webhook",
+                            "webhook_url": "https://example.com",
+                        },
+                    ]
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["subscriptions", "list", "agt_x"])
+    assert result.exit_code == 0, result.output
+    assert "sub_uuid_1" in result.output
+    assert "sub_uuid_2" in result.output
+    assert "pull" in result.output
+    assert "webhook" in result.output
+
+
+def test_subscriptions_list_empty(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("GET", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                200, {"subscriptions": []}
+            )
+        },
+    )
+    result = runner.invoke(main, ["subscriptions", "list", "agt_x"])
+    assert result.exit_code == 0
+    assert "No active subscriptions" in result.output
+
+
+def test_subscriptions_delete_basic(monkeypatch):
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("DELETE", "/agents/agt_x/subscriptions/sub-uuid-1"): lambda: _FakeResp(
+                200, {"status": "detached"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["subscriptions", "delete", "agt_x", "sub-uuid-1"])
+    assert result.exit_code == 0, result.output
+    assert "Subscription detached" in result.output
+
+
+def test_events_help_lists_list_subcommand():
+    result = runner.invoke(main, ["events", "--help"])
+    assert result.exit_code == 0
+    assert "list" in result.output
+
+
+def test_subscriptions_help_lists_subcommands():
+    result = runner.invoke(main, ["subscriptions", "--help"])
+    assert result.exit_code == 0
+    for sub in ("create", "list", "delete"):
+        assert sub in result.output
