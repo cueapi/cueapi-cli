@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
 import webbrowser
 from typing import Optional
 
@@ -1873,6 +1875,80 @@ main.add_command(workers)
 # in the sibling `cueapi agents` command group (separate PR).
 
 
+# ---------------------------------------------------------------------------
+# Body-source acquisition with shell-expansion guard
+# (Phase 3 of body-verify defense-in-depth, Mike directive 2026-05-11.)
+#
+# Empirical bug class: caller-side shell expansion of $(...) / backticks /
+# ${VAR} in body args BEFORE the CLI receives them silently mutates body
+# content. Server accepts the (mutated) POST with HTTP 200; recipient sees
+# corrupted content. Send-helper shell-safety (json.dumps) does NOT
+# protect against this — the mutation is upstream.
+#
+# Mitigation: force-file-by-default. Inline --body accepted ONLY when
+# auto-detected metachar-free; otherwise user gets actionable error with
+# safer alternatives (--message-file, --body-stdin).
+# ---------------------------------------------------------------------------
+
+# Conservative regex — false-positives (legitimate literal metachars) are
+# acceptable cost; user overrides via --allow-inline-metachars. Catches
+# the three classes that command-substitute or expand in bash/zsh.
+_BODY_METACHAR_RE = re.compile(r"\$\(|`|\$\{")
+
+
+def _acquire_message_body(
+    body_text: Optional[str],
+    message_file: Optional[str],
+    body_stdin: bool,
+    allow_inline_metachars: bool,
+) -> str:
+    """Resolve message body from exactly one of 3 sources (file / stdin /
+    inline). Enforce force-file-by-default Layer 3 guard on inline path.
+    """
+    sources_count = sum([
+        message_file is not None,
+        body_stdin,
+        body_text is not None,
+    ])
+    if sources_count == 0:
+        raise click.UsageError(
+            "Provide message body via one of:\n"
+            "  --message-file <path>   (RECOMMENDED — zero shell interpolation)\n"
+            "  --body-stdin            (pipe body via stdin)\n"
+            "  --body '<text>'         (inline; rejected if contains $(...), `...`, ${VAR})"
+        )
+    if sources_count > 1:
+        raise click.UsageError(
+            "Multiple body sources provided — pick exactly one of "
+            "--message-file / --body-stdin / --body."
+        )
+
+    if message_file is not None:
+        try:
+            with open(message_file, "r", encoding="utf-8") as fp:
+                return fp.read()
+        except OSError as e:
+            raise click.UsageError(f"--message-file path unreadable: {e}")
+
+    if body_stdin:
+        return sys.stdin.read()
+
+    # Inline path — Layer 3 metachar guard.
+    assert body_text is not None
+    if not allow_inline_metachars and _BODY_METACHAR_RE.search(body_text):
+        raise click.UsageError(
+            "Inline --body contains shell metacharacters that may have been\n"
+            "expanded by your shell BEFORE cueapi-cli received the arg.\n"
+            "Detected one or more of: $(...), `...`, ${VAR}\n"
+            "\n"
+            "Safe alternatives:\n"
+            "  --message-file <path>           (RECOMMENDED — zero interpolation)\n"
+            "  --body-stdin                    (pipe content from stdin)\n"
+            "  --allow-inline-metachars        (override; you confirm body is literal)"
+        )
+    return body_text
+
+
 @main.group()
 def messages() -> None:
     """Send and manage messages (messaging primitive: per-message lifecycle)."""
@@ -1894,7 +1970,52 @@ def messages() -> None:
     required=True,
     help="Recipient — opaque agent_id or slug-form (agent@user).",
 )
-@click.option("--body", "body_text", required=True, help="Message body (1-32768 chars)")
+@click.option(
+    "--body",
+    "body_text",
+    default=None,
+    help=(
+        "Message body (1-32768 chars). Inline; auto-rejected if it "
+        "contains shell metacharacters ($(...), `...`, ${VAR}) — use "
+        "--message-file or --body-stdin for those, or --allow-inline-metachars "
+        "to override. Provide exactly one of --body / --message-file / --body-stdin."
+    ),
+)
+@click.option(
+    "--message-file",
+    "message_file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help=(
+        "RECOMMENDED for content with shell metacharacters. Reads body "
+        "from the given path (zero shell interpolation). Mint pattern: "
+        "heredoc with single-quoted EOF marker → file → pass path."
+    ),
+)
+@click.option(
+    "--body-stdin",
+    "body_stdin",
+    is_flag=True,
+    default=False,
+    help=(
+        "Read message body from stdin. Use for shell-pipe ergonomics: "
+        "`echo 'hi' | cueapi messages send --body-stdin --from ... --to ...`. "
+        "Caller's shell still expands the producer side (e.g., echo arg) "
+        "but the pipe shape is well-understood."
+    ),
+)
+@click.option(
+    "--allow-inline-metachars",
+    "allow_inline_metachars",
+    is_flag=True,
+    default=False,
+    help=(
+        "Override the Layer 3 force-file guard. Use ONLY when you've "
+        "verified the inline --body content is byte-identical to your "
+        "intent (e.g., shell-tutorial example legitimately containing "
+        "literal $(...) text). Otherwise prefer --message-file."
+    ),
+)
 @click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
 @click.option(
     "--reply-to",
@@ -1979,7 +2100,10 @@ def messages_send(
     ctx: click.Context,
     from_agent: str,
     to: str,
-    body_text: str,
+    body_text: Optional[str],
+    message_file: Optional[str],
+    body_stdin: bool,
+    allow_inline_metachars: bool,
     subject: Optional[str],
     reply_to: Optional[str],
     priority: Optional[int],
@@ -1992,7 +2116,10 @@ def messages_send(
     mode: str,
 ) -> None:
     """Send a message."""
-    body: dict = {"to": to, "body": body_text}
+    resolved_body = _acquire_message_body(
+        body_text, message_file, body_stdin, allow_inline_metachars
+    )
+    body: dict = {"to": to, "body": resolved_body}
     if subject:
         body["subject"] = subject
     if reply_to:
@@ -2248,7 +2375,37 @@ def _resolve_recipient(client, recipient: str) -> str:
         "the X-Cueapi-From-Agent header."
     ),
 )
-@click.option("--body", "body_text", required=True, help="Message body (1-32768 chars)")
+@click.option(
+    "--body",
+    "body_text",
+    default=None,
+    help=(
+        "Message body inline; auto-rejected if it contains shell "
+        "metacharacters. Use --message-file or --body-stdin for content "
+        "with $(...) / backticks / ${VAR}."
+    ),
+)
+@click.option(
+    "--message-file",
+    "message_file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help="RECOMMENDED: read body from file (zero shell interpolation).",
+)
+@click.option(
+    "--body-stdin",
+    "body_stdin",
+    is_flag=True,
+    default=False,
+    help="Read body from stdin (shell-pipe ergonomics).",
+)
+@click.option(
+    "--allow-inline-metachars",
+    "allow_inline_metachars",
+    is_flag=True,
+    default=False,
+    help="Override the Layer 3 force-file guard for legitimate literal-metachar inline content.",
+)
 @click.option("--subject", default=None, help="Optional subject line (max 255 chars)")
 @click.option(
     "--reply-to",
@@ -2330,7 +2487,10 @@ def message_to(
     ctx: click.Context,
     recipient: str,
     from_agent: str,
-    body_text: str,
+    body_text: Optional[str],
+    message_file: Optional[str],
+    body_stdin: bool,
+    allow_inline_metachars: bool,
     subject: Optional[str],
     reply_to: Optional[str],
     priority: Optional[int],
@@ -2348,7 +2508,10 @@ def message_to(
       agent_id (agt_*) or slug-form (slug@user) — used as-is.
       bare name — matched case-insensitive against display_name and slug.
     """
-    body: dict = {"body": body_text}
+    resolved_body = _acquire_message_body(
+        body_text, message_file, body_stdin, allow_inline_metachars
+    )
+    body: dict = {"body": resolved_body}
     if subject:
         body["subject"] = subject
     if reply_to:

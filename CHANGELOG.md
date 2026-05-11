@@ -5,6 +5,7 @@ All notable changes to cueapi-cli will be documented here.
 ## [Unreleased]
 
 ### Added
+- **`messages send` + `message-to`: Layer 3 force-file mode (Mike body-verify directive 2026-05-11).** Three body sources accepted (exactly one required): `--message-file <path>` (RECOMMENDED for content with shell metacharacters; zero shell interpolation), `--body-stdin` (read from stdin; for shell-pipe ergonomics), or `--body <inline>` (auto-rejected when content contains `$(...)`, backticks, or `${VAR}`). Inline body with metachars rejected with actionable error suggesting safer paths; override via `--allow-inline-metachars` for legitimate literal-metachar content (e.g., shell-tutorial examples). Closes the caller-side shell-expansion bug class where `BODY="...$(echo X)..."` silently mutates body content at variable-assignment time before reaching the CLI. Design Dock: `cue-message-silent-corruption-substrate-design-2026-05-11`.
 - `cueapi message-to <recipient>` top-level wrapper for sending a message by name. Resolves `<recipient>` against your agent roster: `agent_id` (`agt_*`) and slug-form (`slug@user`) pass through unchanged; bare names match case-insensitively against `display_name` and `slug` via `GET /agents`. Same flag set as `messages send` (sans `--to`).
 - `agents list --online-only` shortcut for `--status online`. Mutually exclusive with `--status`.
 - `agents describe <ref>` alias for `agents get <ref>`.
