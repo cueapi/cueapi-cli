@@ -3714,3 +3714,91 @@ def test_subscriptions_create_help_lists_inline_body():
     assert "--inline-body" in result.output
     # Mention the 32KB cap so users discover it via --help
     assert "32KB" in result.output or "body_omitted" in result.output
+
+
+# --- cues fire --verify (cueapi-python #41 parity; opt-in body-verify Phase 2) ---
+
+
+def test_fire_verify_off_by_default_omits_header(monkeypatch):
+    """Default (no --verify) MUST NOT send X-CueAPI-Verify-Echo.
+    Opt-in design — substrate fire echoes parsed-defaulted body that
+    could cause spurious diff vs canonical-JSON serialization."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/cues/cue_x/fire"): lambda: _FakeResp(
+                201, {"id": "exec_1", "scheduled_for": "2026-05-12T00:00:00Z"}
+            )
+        },
+    )
+    result = runner.invoke(main, ["fire", "cue_x"])
+    assert result.exit_code == 0, result.output
+    # _MessagesClient captures (method, path, body, headers)
+    _, _, _, headers = holder["client"].calls[-1]
+    assert headers == {} or "X-CueAPI-Verify-Echo" not in (headers or {})
+
+
+def test_fire_verify_on_sends_header(monkeypatch):
+    """--verify sends X-CueAPI-Verify-Echo: true header."""
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/cues/cue_x/fire"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "exec_1",
+                    "scheduled_for": "2026-05-12T00:00:00Z",
+                    "body_received": "{}",
+                    "body_received_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                },
+            )
+        },
+    )
+    result = runner.invoke(main, ["fire", "cue_x", "--verify"])
+    assert result.exit_code == 0, result.output
+    _, _, _, headers = holder["client"].calls[-1]
+    assert headers.get("X-CueAPI-Verify-Echo") == "true"
+
+
+def test_fire_verify_help_lists_flag():
+    result = runner.invoke(main, ["fire", "--help"])
+    assert result.exit_code == 0
+    assert "--verify" in result.output
+    # Mention the OPT-IN rationale so users see the design context
+    assert "opt-in" in result.output.lower() or "default off" in result.output.lower() or "default OFF" in result.output
+
+
+def test_fire_verify_mismatch_exits_7(monkeypatch):
+    """Mismatched body_received from substrate triggers exit 7 with diff diagnostic."""
+    holder: dict = {}
+    # Server reports a different body than what we sent (simulates
+    # caller-side mutation OR substrate misbehavior).
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/cues/cue_x/fire"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "exec_1",
+                    "body_received": '{"payload_override":{"corrupted":true}}',
+                    # SHA doesn't match — but we also include a body_received
+                    # string that differs, so the fallback compare fires.
+                    "body_received_sha256": "0" * 64,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["fire", "cue_x", "--verify",
+         "--payload-override", '{"clean":true}'],
+    )
+    assert result.exit_code == 7, (
+        f"expected exit 7 (verify mismatch), got {result.exit_code}; output: {result.output}"
+    )
+    assert "body-verify mismatch" in result.output
