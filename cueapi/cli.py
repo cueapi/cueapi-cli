@@ -2966,6 +2966,17 @@ def subscriptions() -> None:
               help="Delivery mechanism: pull (poll via `cueapi events list`) or webhook (server POSTs).")
 @click.option("--webhook-url", "webhook_url", default=None,
               help="Required for delivery-target=webhook; HTTPS only.")
+@click.option("--inline-body", "inline_body", is_flag=True, default=False,
+              help=(
+                  "Opt into body embedding on emitted events (hosted PR #791, "
+                  "Item 1). When set, the source message body is embedded in "
+                  "event payloads as `payload.body` — eliminates the extra "
+                  "GET /v1/messages/{id} round-trip on the consumer side. "
+                  "Bodies > 32KB are NOT embedded; the payload instead carries "
+                  "`payload.body_omitted = \"size_too_large\"` + "
+                  "`payload.body_size_bytes = N` so consumers fall back to the "
+                  "fetch. Default unset = server default (False)."
+              ))
 @click.pass_context
 def subscriptions_create(
     ctx: click.Context,
@@ -2973,6 +2984,7 @@ def subscriptions_create(
     event_type: str,
     delivery_target: str,
     webhook_url: Optional[str],
+    inline_body: bool,
 ) -> None:
     """Create a subscription for an agent.
 
@@ -2987,6 +2999,13 @@ def subscriptions_create(
     body: dict = {"event_type": event_type, "delivery_target": delivery_target}
     if webhook_url:
         body["webhook_url"] = webhook_url
+    # is_flag means click defaults to False when unset; only send the
+    # field when explicitly opted in (matches SDK convention — keeps the
+    # wire format identical to pre-#791 callers for the common no-embed
+    # case). Sending False when the user explicitly opted out would also
+    # work but adds payload noise; the server default handles it.
+    if inline_body:
+        body["inline_body"] = True
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             resp = client.post(f"/agents/{ref}/subscriptions", json=body)
