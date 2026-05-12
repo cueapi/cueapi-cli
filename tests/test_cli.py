@@ -3643,3 +3643,74 @@ def test_bulk_delete_rejects_more_than_100_ids_pre_request():
     # exit code shape is implementation-detail (echo_error may raise
     # SystemExit). What matters is the cap message appears.
     assert "100" in result.output
+
+
+# --- subscriptions --inline-body (hosted PR #791 / Item 1 parity) ---
+
+
+def test_subscriptions_create_inline_body_flag_default_omits_field(monkeypatch):
+    """Default (no --inline-body flag) MUST NOT send inline_body on the wire.
+    Preserves pre-#791 caller compatibility — server default of False applies."""
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "sub_uuid",
+                    "event_type": "message.received",
+                    "delivery_target": "pull",
+                    "inline_body": False,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["subscriptions", "create", "agt_x",
+         "--event-type", "message.received",
+         "--delivery-target", "pull"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert "inline_body" not in body
+
+
+def test_subscriptions_create_inline_body_flag_opts_in(monkeypatch):
+    """--inline-body opts into body-embedding on emitted events."""
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents/agt_x/subscriptions"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "sub_uuid",
+                    "event_type": "message.received",
+                    "delivery_target": "pull",
+                    "inline_body": True,
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["subscriptions", "create", "agt_x",
+         "--event-type", "message.received",
+         "--delivery-target", "pull",
+         "--inline-body"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["inline_body"] is True
+
+
+def test_subscriptions_create_help_lists_inline_body():
+    result = runner.invoke(main, ["subscriptions", "create", "--help"])
+    assert result.exit_code == 0
+    assert "--inline-body" in result.output
+    # Mention the 32KB cap so users discover it via --help
+    assert "32KB" in result.output or "body_omitted" in result.output
