@@ -1,6 +1,7 @@
 """CueAPI CLI — Click command group and all commands."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -557,6 +558,22 @@ def bulk_delete(ctx: click.Context, cue_ids: tuple, yes: bool) -> None:
         "FireRequest schema; diverges from messaging primitive's Idempotency-Key header)."
     ),
 )
+@click.option(
+    "--verify",
+    "verify",
+    is_flag=True,
+    default=False,
+    help=(
+        "OPT-IN body-verify Phase 2 (Mike body-verify directive 2026-05-11; parity "
+        "with cueapi-python #41). When set, the CLI sends X-CueAPI-Verify-Echo + "
+        "compares substrate-echoed body_received (or body_received_sha256, constant-cost) "
+        "against the body sent; exits 7 on mismatch with byte-diff diagnostic. Default OFF "
+        "for cues fire because the substrate /v1/cues/{id}/fire echoes a pydantic-after-parse "
+        "body that may include server-side default-population, which would cause spurious "
+        "diff vs the CLI's canonical-JSON serialization. Opt in when you know substrate "
+        "echo semantics match your serialization (typical for the sha256 constant-cost path)."
+    ),
+)
 @click.pass_context
 def fire(
     ctx: click.Context,
@@ -566,6 +583,7 @@ def fire(
     send_at: Optional[str],
     exit_criteria: tuple,
     idempotency_key: Optional[str],
+    verify: bool,
 ) -> None:
     """Fire an existing cue immediately, optionally overriding its payload."""
     body: dict = {}
@@ -589,9 +607,20 @@ def fire(
         # from messaging primitive's Idempotency-Key header convention).
         body["idempotency_key"] = idempotency_key
 
+    headers: dict = {}
+    sent_body_bytes: Optional[bytes] = None
+    if verify:
+        # Phase 2 of body-verify defense in depth. Opt-in for cues fire (default
+        # off — substrate echoes parsed-defaulted body shape; only enable when
+        # caller knows their serialization matches).
+        headers["X-CueAPI-Verify-Echo"] = "true"
+        sent_body_bytes = json.dumps(
+            body, separators=(",", ":")
+        ).encode("utf-8")
+
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
-            resp = client.post(f"/cues/{cue_id}/fire", json=body)
+            resp = client.post(f"/cues/{cue_id}/fire", json=body, headers=headers)
             if resp.status_code in (200, 201, 202):
                 data = resp.json()
                 exec_id = data.get("id") or data.get("execution_id", "?")
@@ -600,6 +629,58 @@ def fire(
                 echo_info("Execution:", exec_id)
                 if scheduled:
                     echo_info("Scheduled:", scheduled)
+
+                # Phase 2 body-verify check (only when --verify is set).
+                # Defensive isinstance: substrate may emit body_received as
+                # str (post-#798 spec-lock) or dict (pre-#798 wire shape).
+                if verify and sent_body_bytes is not None and isinstance(data, dict):
+                    received_raw = data.get("body_received")
+                    received_str: Optional[str] = None
+                    if isinstance(received_raw, str):
+                        received_str = received_raw
+                    elif isinstance(received_raw, dict):
+                        received_str = json.dumps(
+                            received_raw, separators=(",", ":")
+                        )
+
+                    sha_field = data.get("body_received_sha256")
+                    mismatch = False
+                    sent_str = sent_body_bytes.decode("utf-8")
+                    if isinstance(sha_field, str) and len(sha_field) == 64:
+                        # Constant-cost SHA256 compare first; fall back to
+                        # string compare on SHA drift since canonical-JSON
+                        # differences (key order, whitespace) can cause
+                        # spurious hash diff.
+                        client_sha = hashlib.sha256(sent_body_bytes).hexdigest()
+                        if client_sha != sha_field:
+                            if received_str is not None and received_str != sent_str:
+                                mismatch = True
+                    else:
+                        # No SHA field; string compare directly.
+                        if received_str is not None and received_str != sent_str:
+                            mismatch = True
+
+                    if mismatch and received_str is not None:
+                        sent_len = len(sent_str)
+                        recv_len = len(received_str)
+                        divergence = _first_divergence_byte(sent_str, received_str)
+                        if divergence == -1 and sent_len != recv_len:
+                            divergence = min(sent_len, recv_len)
+                        # Use click.echo+SystemExit(7) directly — echo_error
+                        # would raise SystemExit(1) and shadow the verify-
+                        # specific exit code 7 (which matches the messages-
+                        # send verify exit shape; same diagnostic surface).
+                        click.echo(
+                            click.style(
+                                f"Error: body-verify mismatch on cues fire (execution={exec_id}): "
+                                f"sent {sent_len} chars, substrate received {recv_len} chars" +
+                                (f", first divergence at byte {divergence}" if divergence >= 0 else "") +
+                                ". Likely caller-side mutation of payload_override before reaching the CLI.",
+                                fg="red",
+                            ),
+                            err=True,
+                        )
+                        raise SystemExit(7)
             elif resp.status_code == 404:
                 echo_error(f"Cue not found: {cue_id}")
             else:
