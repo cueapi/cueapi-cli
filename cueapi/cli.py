@@ -1528,6 +1528,22 @@ def agents() -> None:
 @click.option("--slug", default=None, help="Per-user unique slug (optional; server derives from display-name when omitted)")
 @click.option("--webhook-url", "webhook_url", default=None, help="Push-delivery target. SSRF-validated. Omit for poll-only.")
 @click.option("--metadata", default=None, help="JSON metadata blob")
+@click.option(
+    "--parent-agent-id",
+    "parent_agent_id",
+    default=None,
+    help=(
+        "Agent-id-split refactor (2026-05-12) — link this new agent as a "
+        "sibling of the given parent agent. Used when creating a Live "
+        "sibling for an existing BG agent: pass the BG agent's id here "
+        "and substrate stores the FK so router can fall back from Live "
+        "to BG via parent_agent_id when the Live session is silent "
+        "(see --live-fallback-mode on `messages send`). Omit for "
+        "standalone (parent) agents. Substrate enforces FK validity. "
+        "Design Dock: "
+        "https://trydock.ai/workspaces/agent-id-split-refactor-2026-05-12"
+    ),
+)
 @click.pass_context
 def agents_create(
     ctx: click.Context,
@@ -1535,6 +1551,7 @@ def agents_create(
     slug: Optional[str],
     webhook_url: Optional[str],
     metadata: Optional[str],
+    parent_agent_id: Optional[str],
 ) -> None:
     """Create an agent.
 
@@ -1552,6 +1569,10 @@ def agents_create(
             body["metadata"] = json.loads(metadata)
         except json.JSONDecodeError:
             raise click.UsageError("--metadata must be valid JSON")
+    # Agent-id-split refactor (2026-05-12) — pass-through to substrate.
+    # Default-omit when None so wire format matches pre-refactor senders.
+    if parent_agent_id:
+        body["parent_agent_id"] = parent_agent_id
     try:
         with CueAPIClient(api_key=ctx.obj.get("api_key"), profile=ctx.obj.get("profile")) as client:
             resp = client.post("/agents", json=body)
@@ -2398,6 +2419,27 @@ def messages() -> None:
         "`auto` (or omitted) — server treats absent === auto."
     ),
 )
+@click.option(
+    "--live-fallback-mode",
+    "live_fallback_mode",
+    default="fallback_to_background",
+    type=click.Choice(["live_only", "fallback_to_background"]),
+    show_default=True,
+    help=(
+        "Agent-id-split refactor (2026-05-12) — controls behavior when "
+        "the recipient is a Live-sibling agent and its Live session is "
+        "silent (no fresh heartbeat). "
+        "fallback_to_background = substrate looks up the BG sibling via "
+        "parent_agent_id and routes there (work gets done even if Live "
+        "is detached). "
+        "live_only = message queues against the Live agent until that "
+        "specific Live session attaches. "
+        "CLI omits the field on the wire when set to the substrate "
+        "default (fallback_to_background) so wire format matches pre-"
+        "refactor senders. Design Dock: "
+        "https://trydock.ai/workspaces/agent-id-split-refactor-2026-05-12"
+    ),
+)
 @click.pass_context
 def messages_send(
     ctx: click.Context,
@@ -2418,6 +2460,7 @@ def messages_send(
     send_at: Optional[str],
     notify: tuple,
     mode: str,
+    live_fallback_mode: str,
 ) -> None:
     """Send a message."""
     resolved_body = _acquire_message_body(
@@ -2459,6 +2502,13 @@ def messages_send(
     # identical to pre-Surface-6 senders. Server treats absent === auto.
     if mode != "auto":
         body["delivery_mode"] = mode
+    # Agent-id-split refactor (2026-05-12) — default-omit when value
+    # matches the substrate default (fallback_to_background). Wire format
+    # matches pre-refactor senders for the common path; only the
+    # opt-in live_only case sends the field. Same default-omit pattern
+    # as Surface 6 v2 mode + §17 notify.
+    if live_fallback_mode != "fallback_to_background":
+        body["live_fallback_mode"] = live_fallback_mode
 
     headers: dict = {"X-Cueapi-From-Agent": from_agent}
     if idempotency_key:

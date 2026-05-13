@@ -469,6 +469,69 @@ def test_agents_create_invalid_metadata_json(monkeypatch):
     assert "json" in result.output.lower()
 
 
+# --- agent-id-split refactor (2026-05-12) — --parent-agent-id ---
+
+
+def test_agents_create_parent_agent_id_default_omitted(monkeypatch):
+    # No --parent-agent-id → field omitted on the wire. Wire format
+    # matches pre-refactor senders; standalone (parent) agents look
+    # identical to today's create requests.
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents"): lambda: _FakeResp(
+                201,
+                {"id": "agt_x", "slug": "solo", "display_name": "Solo", "status": "online"},
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["agents", "create", "--display-name", "Solo"],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert "parent_agent_id" not in body
+
+
+def test_agents_create_parent_agent_id_passed_through(monkeypatch):
+    # --parent-agent-id <agt_xxx> flows as body.parent_agent_id. Used
+    # when creating a Live sibling of an existing BG agent so substrate
+    # can fall back from Live to BG via the parent_agent_id FK.
+    holder: dict = {}
+    _patch_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/agents"): lambda: _FakeResp(
+                201,
+                {
+                    "id": "agt_livesib0001",
+                    "slug": "linkedin-content-agent-live",
+                    "display_name": "LinkedIn Content Agent (Live)",
+                    "status": "online",
+                },
+            )
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "agents", "create",
+            "--display-name", "LinkedIn Content Agent (Live)",
+            "--slug", "linkedin-content-agent-live",
+            "--parent-agent-id", "agt_parentbg0001",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["parent_agent_id"] == "agt_parentbg0001"
+    assert body["display_name"] == "LinkedIn Content Agent (Live)"
+    assert body["slug"] == "linkedin-content-agent-live"
+
+
 # --- list params ---
 
 
@@ -2446,6 +2509,96 @@ def test_messages_send_mode_auto_explicitly_omitted(monkeypatch):
     assert result.exit_code == 0
     body = holder["client"].calls[-1][2]
     assert "delivery_mode" not in body
+
+
+# --- agent-id-split refactor (2026-05-12) — --live-fallback-mode ---
+
+
+def test_messages_send_live_fallback_mode_default_omitted(monkeypatch):
+    # Default --live-fallback-mode=fallback_to_background matches the
+    # substrate default; CLI omits on the wire so pre-refactor senders
+    # observe an unchanged wire format. Same default-omit shape as --mode.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        ["messages", "send", "--from", "x", "--to", "y", "--body", "hi"],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "live_fallback_mode" not in body
+
+
+def test_messages_send_live_fallback_mode_explicit_default_omitted(monkeypatch):
+    # Explicit --live-fallback-mode fallback_to_background also omits
+    # (explicit-default == default). Pin shape symmetric with --mode auto.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--live-fallback-mode", "fallback_to_background",
+        ],
+    )
+    assert result.exit_code == 0
+    body = holder["client"].calls[-1][2]
+    assert "live_fallback_mode" not in body
+
+
+def test_messages_send_live_fallback_mode_live_only_passed_through(monkeypatch):
+    # The opt-in case: --live-fallback-mode live_only flows as
+    # body.live_fallback_mode. Substrate routes the message strictly to
+    # the Live sibling; no parent-agent fallback.
+    holder: dict = {}
+    _patch_messages_client(
+        monkeypatch,
+        holder,
+        responses={
+            ("POST", "/messages"): lambda: _FakeResp(201, {"id": "msg_x", "delivery_state": "queued"})
+        },
+    )
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--live-fallback-mode", "live_only",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = holder["client"].calls[-1][2]
+    assert body["live_fallback_mode"] == "live_only"
+
+
+def test_messages_send_live_fallback_mode_rejects_unknown(monkeypatch):
+    # Click.Choice rejects values outside the enum at CLI parse time;
+    # CLI exits with usage error (non-zero) before the HTTP call.
+    holder: dict = {}
+    _patch_messages_client(monkeypatch, holder)
+    result = runner.invoke(
+        main,
+        [
+            "messages", "send",
+            "--from", "x", "--to", "y", "--body", "hi",
+            "--live-fallback-mode", "bogus_value",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "bogus_value" in result.output or "Invalid value" in result.output
 
 
 def test_message_to_notify_passed_as_body_list(monkeypatch):
